@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+"modelo do evento recebido"
+"Valida o JSON recebido pelo ingestion.py como Evento Qualificado"
 
 @dataclass
 class EventoQualificado:
