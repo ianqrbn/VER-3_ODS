@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from s3.contracts import EventoQualificado
 from s3.alert import Alerta
+from s3.history import RegistroHistorico
 from s3.repository import AlertRepository
 from s3.routing import RoteadorAlertas
 
@@ -117,3 +118,71 @@ class AlertService:
             destinatarios=list(configuracao.destinatarios),
             canais=list(configuracao.canais),
         )
+
+    def reconhecer_alerta(
+        self,
+        alerta_id: str,
+        autor_id: str,
+    ) -> Alerta:
+        """
+        Registra que um responsável confirmou ter visto o alerta.
+        """
+
+        alerta = self.repository.buscar_por_id(alerta_id)
+
+        if alerta is None:
+            raise ValueError(
+                "Alerta não encontrado."
+            )
+
+        if alerta.estado == "SILENCIADO":
+            raise ValueError(
+                "Um alerta silenciado não pode ser reconhecido."
+            )
+
+        registro = RegistroHistorico(
+            alerta_id=alerta.alerta_id,
+            evento_id=alerta.evento_id,
+            acao="RECONHECIDO",
+            autor_id=autor_id,
+        )
+
+        self.repository.registrar_historico(registro)
+
+        alerta.estado = "RECONHECIDO"
+
+        return alerta
+
+    def silenciar_alerta(
+        self,
+        alerta_id: str,
+        autor_id: str,
+    ) -> Alerta:
+        """
+        Silencia o alerta, registrando o responsável pela ação.
+        """
+
+        alerta = self.repository.buscar_por_id(alerta_id)
+
+        if alerta is None:
+            raise ValueError(
+                "Alerta não encontrado."
+            )
+
+        if alerta.estado == "SILENCIADO":
+            raise ValueError(
+                "O alerta já está silenciado."
+            )
+
+        registro = RegistroHistorico(
+            alerta_id=alerta.alerta_id,
+            evento_id=alerta.evento_id,
+            acao="SILENCIADO",
+            autor_id=autor_id,
+        )
+
+        self.repository.registrar_historico(registro)
+
+        alerta.estado = "SILENCIADO"
+
+        return alerta
