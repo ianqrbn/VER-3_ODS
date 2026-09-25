@@ -6,7 +6,7 @@ from s3.contracts import EventoQualificado
 from s3.service import AlertService
 
 'adaptador de JSON'
-'Recebe o JSON do B3'
+'Recebe o JSON do B3 e transforma em dados'
 
 class IngestorEventos:
     """

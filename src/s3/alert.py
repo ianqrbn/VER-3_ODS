@@ -1,12 +1,13 @@
-
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-"modelo do alerta"
 
 @dataclass
 class Alerta:
+    """
+    Modelo interno de um alerta do S3.
+    """
 
     alerta_id: str
     evento_id: str
@@ -15,7 +16,6 @@ class Alerta:
     canais: list[str]
 
     evidencia_ref: Optional[str] = None
-
     estado: str = "CRIADO"
 
     criado_em: datetime = field(
@@ -25,7 +25,9 @@ class Alerta:
     def validar(self) -> None:
 
         if not self.alerta_id:
-            raise ValueError("O alerta precisa de um ID.")
+            raise ValueError(
+                "O alerta precisa de um ID."
+            )
 
         if not self.evento_id:
             raise ValueError(
@@ -33,28 +35,26 @@ class Alerta:
             )
 
         if not self.severidade:
-            raise ValueError("A severidade é obrigatória.")
+            raise ValueError(
+                "A severidade é obrigatória."
+            )
+
+        if not isinstance(self.destinatarios, list):
+            raise ValueError(
+                "Os destinatários devem ser uma lista."
+            )
 
         if not self.destinatarios:
             raise ValueError(
                 "O alerta precisa de destinatários."
             )
 
+        if not isinstance(self.canais, list):
+            raise ValueError(
+                "Os canais devem ser uma lista."
+            )
+
         if not self.canais:
             raise ValueError(
                 "O alerta precisa de canais de entrega."
             )
-            
-if __name__ == "__main__":
-    evento = Alerta(
-        alerta_id="evt-001",
-        evento_id="VIOLACAO_EPI",
-        severidade="S2",
-        destinatarios="[]",
-        canais="[]"
-    )
-
-    evento.validar()
-
-    print("Evento validado com sucesso!")
-    print(evento)

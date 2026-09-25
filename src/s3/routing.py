@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from s3.contracts import EventoQualificado
 
 "configuração e roteador"
-'Decide as configurações do alerta (severidade e canais)'
+'Decide as configurações do alerta (severidade, destinatário e canais)'
 
 @dataclass(frozen=True)
 class ConfiguracaoRoteamento:
