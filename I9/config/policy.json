@@ -1,0 +1,64 @@
+{
+  "policy_id": "default",
+  "version": "1.0",
+  "person_classes": ["pessoa", "person", "pessoas"],
+  "equipment": [
+    {
+      "class": "CAPACETES",
+      "aliases": ["capacete", "capacetes", "CAPACETE", "CAPACETES", "helmet"],
+      "required": true,
+      "zone": "HEAD",
+      "u_range": [0.28, 0.72],
+      "v_range": [0.72, 1.1],
+      "tolerance_u": 0.18,
+      "tolerance_v": 0.18,
+      "min_association": 0.45
+    },
+    {
+      "class": "COLETES",
+      "aliases": ["colete", "coletes", "COLETE", "COLETES", "vest"],
+      "required": true,
+      "zone": "TORSO",
+      "u_range": [0.2, 0.8],
+      "v_range": [0.38, 0.74],
+      "tolerance_u": 0.2,
+      "tolerance_v": 0.16,
+      "min_association": 0.45
+    },
+    {
+      "class": "LUVAS",
+      "aliases": ["luva", "luvas", "LUVA", "LUVAS", "glove"],
+      "required": true,
+      "zone": "HANDS",
+      "u_range": [0.02, 0.98],
+      "v_range": [0.1, 0.55],
+      "tolerance_u": 0.15,
+      "tolerance_v": 0.18,
+      "min_association": 0.45
+    }
+  ],
+  "association": {
+    "weight_overlap": 0.6,
+    "weight_proximity": 0.4,
+    "weight_ground": 0.0,
+    "expand_x": 0.2,
+    "expand_y": 0.1,
+    "proximity_sigma_u": 0.5,
+    "proximity_tolerance_v": 0.25,
+    "ground_radius_m": 4.0,
+    "use_ground": true
+  },
+  "confidence": {
+    "correct_threshold": 0.75,
+    "predicted_factor": 0.7,
+    "unknown_state_factor": 0.5,
+    "absence_base": 0.62,
+    "absence_max": 0.7,
+    "absence_candidate_penalty": 0.85,
+    "max_confidence": 0.95
+  },
+  "calibration": {
+    "max_reprojection_rms_cm": 5.0,
+    "min_holdout_points": 4
+  }
+}

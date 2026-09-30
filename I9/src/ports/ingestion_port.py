@@ -1,13 +1,16 @@
-from typing import Protocol, Optional
-from src.domain.models import FrameContexto
+from typing import Optional, Protocol
+
+from src.domain.models import TrackingFrame
+
 
 class IngestionPort(Protocol):
     """
-    Protocolo que define como o módulo principal irá consumir dados da frente (I1).
+    Protocolo de consumo dos eventos de rastreio (I2 / `ods.inferencia.rastreio`).
+
+    A implementação concreta é responsável por assinar o barramento pub/sub,
+    validar o envelope e devolver o payload já convertido para o domínio.
     """
-    def get_next_frame(self) -> Optional[FrameContexto]:
-        """
-        Retorna o próximo frame processado com as detecções (já convertidas para o domínio),
-        ou None se não houver ou a fonte esgotar.
-        """
+
+    def get_next_event(self) -> Optional[TrackingFrame]:
+        """Próximo quadro disponível, ou None quando não há (ou a fonte esgotou)."""
         ...
