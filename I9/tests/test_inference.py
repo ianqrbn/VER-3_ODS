@@ -11,6 +11,7 @@ from tests.helpers import (
     make_calibration,
     make_frame,
     make_track,
+    policy_from,
     uncapped_policy,
 )
 from src.core.calibration import CalibrationStore
@@ -143,3 +144,51 @@ class ConfidenceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PolicyDrivenClassTest(unittest.TestCase):
+    """A Opção A mantém a configuração no nível de 'qual EPI em qual zona'."""
+
+    def test_classe_opcional_nao_gera_ausente(self):
+        def mutation(data):
+            data["equipment"][2]["required"] = False  # LUVAS deixa de ser obrigatória
+
+        avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_OK], policy_from(mutation))
+        classes = {e.canonical_class for e in avaliacoes[0].equipment}
+        self.assertEqual(classes, {"CAPACETES", "COLETES"})
+
+    def test_classe_nova_reaproveita_zona_existente(self):
+        def mutation(data):
+            data["equipment"].append(
+                {
+                    "class": "PROTETORES_AURICULARES",
+                    "aliases": ["protetor_auricular", "protetor"],
+                    "required": True,
+                    "zone": "HEAD",
+                }
+            )
+
+        policy = policy_from(mutation)
+        # nenhuma mudança de código: a regra aponta para uma zona do registro
+        self.assertIs(policy.zone_for("protetor_auricular").name, "HEAD")
+        avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_OK], policy)
+        protetor = item_for(avaliacoes, 0, "PROTETORES_AURICULARES")
+        self.assertIs(protetor.state, RelationalState.AUSENTE)
+        self.assertEqual(protetor.evidence["zone"], "HEAD")
+
+    def test_classe_nova_detectada_usa_a_zona_declarada(self):
+        def mutation(data):
+            data["equipment"].append(
+                {
+                    "class": "PROTETORES_AURICULARES",
+                    "aliases": ["protetor_auricular"],
+                    "required": True,
+                    "zone": "HEAD",
+                }
+            )
+
+        protetor_track = make_track(14, "protetor_auricular", make_bbox(500, 900, 40, 40))
+        avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_OK, protetor_track], policy_from(mutation))
+        protetor = item_for(avaliacoes, 0, "PROTETORES_AURICULARES")
+        self.assertIs(protetor.state, RelationalState.CORRETO)
+        self.assertEqual(protetor.evidence["expected_zone"], "HEAD")

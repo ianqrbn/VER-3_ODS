@@ -1,11 +1,21 @@
-"""Testes da política de EPI (carregamento, aliases e validações)."""
+"""Testes da política de EPI (carregamento, aliases, zonas e validações)."""
 
 from __future__ import annotations
 
 import unittest
 
 from tests.helpers import default_policy
-from src.domain.policy import EquipmentPolicy
+from src.domain.body_zones import BodyZone
+from src.domain.policy import EquipmentPolicy, ZoneRule
+
+
+def regra_center(regra: ZoneRule):
+    centro = regra.geometry.center
+    return (round(centro[0], 2), round(centro[1], 2))
+
+
+def regra_tolerance(regra: ZoneRule):
+    return (regra.geometry.tolerance_u, regra.geometry.tolerance_v)
 
 
 def minimal(**overrides):
@@ -17,8 +27,7 @@ def minimal(**overrides):
                 "class": "CAPACETES",
                 "aliases": ["capacete"],
                 "required": True,
-                "u_range": [0.3, 0.7],
-                "v_range": [0.7, 1.1],
+                "zone": "HEAD",
             }
         ],
     }
@@ -30,10 +39,21 @@ class PolicyLoadingTest(unittest.TestCase):
     def test_politica_padrao_do_projeto(self):
         policy = default_policy()
         self.assertEqual(policy.policy_id, "default")
-        self.assertEqual(
-            policy.class_order, ("CAPACETES", "COLETES", "LUVAS")
-        )
+        self.assertEqual(policy.class_order, ("CAPACETES", "COLETES", "LUVAS"))
         self.assertEqual(policy.required_classes(), ("CAPACETES", "COLETES", "LUVAS"))
+
+    def test_zonas_associadas_as_classes(self):
+        policy = default_policy()
+        self.assertIs(policy.zone_for("capacete"), BodyZone.HEAD)
+        self.assertIs(policy.zone_for("colete"), BodyZone.TORSO)
+        self.assertIs(policy.zone_for("luvas"), BodyZone.HANDS)
+        self.assertIsNone(policy.zone_for("protetor_auricular"))
+
+    def test_geometria_vem_do_motor(self):
+        policy = default_policy()
+        regra = policy.rules["CAPACETES"]
+        self.assertEqual(regra_center(regra), (0.5, 0.91))
+        self.assertEqual(regra_tolerance(regra), (0.18, 0.18))
 
     def test_alias_case_insensitive(self):
         policy = default_policy()
@@ -50,13 +70,16 @@ class PolicyLoadingTest(unittest.TestCase):
         self.assertFalse(policy.detect_unknown_class("capacete"))
         self.assertFalse(policy.detect_unknown_class("pessoa"))
 
-    def test_regra_com_zonas_e_tolerancias(self):
+    def test_min_association_tem_default_do_motor(self):
         policy = default_policy()
-        capacete = policy.rules["CAPACETES"]
-        self.assertEqual(capacete.zone, "HEAD")
-        self.assertAlmostEqual(capacete.v_min, 0.72)
-        self.assertAlmostEqual(capacete.v_max, 1.10)
-        self.assertAlmostEqual(capacete.center[0], 0.5)
+        self.assertEqual(policy.rules["CAPACETES"].min_association, 0.45)
+
+    def test_classe_opcional(self):
+        data = minimal()
+        data["equipment"][0]["required"] = False
+        policy = EquipmentPolicy.from_dict(data)
+        self.assertFalse(policy.rules["CAPACETES"].required)
+        self.assertEqual(policy.required_classes(), ())
 
 
 class PolicyValidationTest(unittest.TestCase):
@@ -69,20 +92,21 @@ class PolicyValidationTest(unittest.TestCase):
     def test_alias_ambiguo(self):
         data = minimal()
         data["equipment"].append(
-            {
-                "class": "COLETES",
-                "aliases": ["capacete"],
-                "u_range": [0.2, 0.8],
-                "v_range": [0.4, 0.7],
-            }
+            {"class": "COLETES", "aliases": ["capacete"], "zone": "TORSO"}
         )
         with self.assertRaisesRegex(ValueError, "ambíguo"):
             EquipmentPolicy.from_dict(data)
 
-    def test_intervalo_invertido(self):
+    def test_zona_desconhecida(self):
         data = minimal()
-        data["equipment"][0]["u_range"] = [0.9, 0.2]
-        with self.assertRaisesRegex(ValueError, "max > min"):
+        data["equipment"][0]["zone"] = "EARS"
+        with self.assertRaisesRegex(ValueError, "zona desconhecida"):
+            EquipmentPolicy.from_dict(data)
+
+    def test_zona_ausente(self):
+        data = minimal()
+        del data["equipment"][0]["zone"]
+        with self.assertRaisesRegex(ValueError, "zone"):
             EquipmentPolicy.from_dict(data)
 
     def test_pessoa_nao_pode_ser_classe_de_epi(self):
@@ -106,6 +130,15 @@ class PolicyValidationTest(unittest.TestCase):
         data["association"] = {"weight_overlap": 0.0, "weight_proximity": 0.0}
         with self.assertRaisesRegex(ValueError, "pesos"):
             EquipmentPolicy.from_dict(data)
+
+
+def regra_center(regra):
+    centro = regra.geometry.center
+    return (round(centro[0], 2), round(centro[1], 2))
+
+
+def regra_tolerance(regra):
+    return (regra.geometry.tolerance_u, regra.geometry.tolerance_v)
 
 
 if __name__ == "__main__":

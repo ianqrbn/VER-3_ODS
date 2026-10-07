@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from src.core.geometry import normalized_position, zone_score
+from src.domain.body_zones import ZoneGeometry
 from src.domain.models import (
     EquipmentEvaluation,
     EquipmentMatch,
@@ -67,6 +68,13 @@ class RelationInferenceModule:
 
         return PersonEvaluation(person=relation.person, equipment=tuple(evaluations))
 
+    def _zone_geometry(self, canonical: str) -> ZoneGeometry:
+        """Geometria da zona, considerando zonas customizadas da política."""
+        rule = self.policy.rules[canonical]
+        if rule.zone in self.policy.custom_zones:
+            return self.policy.custom_zones[rule.zone]
+        return rule.geometry
+
     def _evaluate_detected(
         self,
         person: Track,
@@ -75,8 +83,9 @@ class RelationInferenceModule:
         match: EquipmentMatch,
     ) -> EquipmentEvaluation:
         rule = self.policy.rules[canonical]
+        zone_geometry = self._zone_geometry(canonical)
         u, v = normalized_position(match.track.bbox, person.bbox)
-        placement = zone_score(u, v, rule)
+        placement = zone_score(u, v, zone_geometry)
         factor = self._state_factor(match.track)
 
         if placement >= self.policy.confidence.correct_threshold:
@@ -92,7 +101,7 @@ class RelationInferenceModule:
             "association_score_pct": round(match.association_score * 100.0, 2),
             "placement_score_pct": round(placement * 100.0, 2),
             "person_normalized_center": {"u": round(u, 4), "v": round(v, 4)},
-            "expected_zone": rule.zone,
+            "expected_zone": rule.zone.value,
         }
         if match.ground_distance_m is not None:
             evidence["ground_distance_m"] = round(match.ground_distance_m, 3)
@@ -125,7 +134,7 @@ class RelationInferenceModule:
             track=None,
             evidence={
                 "reason": "no_candidate_in_person_region",
-                "zone": self.policy.rules[canonical].zone,
+                "zone": self.policy.rules[canonical].zone.value,
             },
         )
 

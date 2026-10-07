@@ -14,8 +14,8 @@ from src.core.geometry import (
     person_relative_proximity,
     zone_score,
 )
+from src.domain.body_zones import ZoneGeometry, get_zone
 from src.domain.models import BoundingBox
-from src.domain.policy import ZoneRule
 
 
 class BoundingBoxTest(unittest.TestCase):
@@ -56,7 +56,6 @@ class BoundingBoxTest(unittest.TestCase):
 
 class NormalizedPositionTest(unittest.TestCase):
     def test_origem_no_canto_inferior_esquerdo(self):
-        # um retângulo apoiado na base da pessoa tem v próximo de 0
         base = make_bbox(PERSON_BOX.x_min, PERSON_BOX.y_min, 20, 20)
         u, v = normalized_position(base, PERSON_BOX)
         self.assertAlmostEqual(u, 10 / PERSON_BOX.width)
@@ -75,9 +74,7 @@ class NormalizedPositionTest(unittest.TestCase):
 
 class ZoneScoreTest(unittest.TestCase):
     def setUp(self):
-        self.rule = ZoneRule(
-            canonical_class="TESTE",
-            zone="HEAD",
+        self.zone = ZoneGeometry(
             u_min=0.30,
             u_max=0.70,
             v_min=0.72,
@@ -87,24 +84,30 @@ class ZoneScoreTest(unittest.TestCase):
         )
 
     def test_centro_da_zona(self):
-        self.assertAlmostEqual(zone_score(0.50, 0.91, self.rule), 1.0)
+        self.assertAlmostEqual(zone_score(0.50, 0.91, self.zone), 1.0)
 
     def test_borda_da_zona(self):
-        self.assertAlmostEqual(zone_score(0.30, 0.72, self.rule), 0.70)
+        self.assertAlmostEqual(zone_score(0.30, 0.72, self.zone), 0.70)
 
     def test_fora_da_zona_decai_ate_a_tolerancia(self):
-        meia = zone_score(0.50, 0.72 - 0.09, self.rule)
-        limite = zone_score(0.50, 0.72 - 0.18, self.rule)
+        meia = zone_score(0.50, 0.72 - 0.09, self.zone)
+        limite = zone_score(0.50, 0.72 - 0.18, self.zone)
         self.assertAlmostEqual(meia, 0.35)
         self.assertAlmostEqual(limite, 0.0)
-        self.assertEqual(zone_score(0.50, 0.72 - 1.0, self.rule), 0.0)
+        self.assertEqual(zone_score(0.50, 0.72 - 1.0, self.zone), 0.0)
 
     def test_decaimento_isotropico_nas_tolerancias(self):
         # 0.09 equivale a meia tolerância em u e em v -> mesma pontuação
         self.assertAlmostEqual(
-            zone_score(0.30 - 0.09, 0.91, self.rule),
-            zone_score(0.50, 0.72 - 0.09, self.rule),
+            zone_score(0.30 - 0.09, 0.91, self.zone),
+            zone_score(0.50, 0.72 - 0.09, self.zone),
         )
+
+    def test_centro_de_cada_zona_do_corpo_valida(self):
+        for nome in ("HEAD", "TORSO", "HANDS"):
+            geometria = get_zone(nome)
+            u, v = geometria.center
+            self.assertAlmostEqual(zone_score(u, v, geometria), 1.0, msg=nome)
 
 
 class ProximityTest(unittest.TestCase):
@@ -142,13 +145,11 @@ class HomographyTest(unittest.TestCase):
     )
 
     def test_protecao_de_ponto(self):
-        # o denominador homogêneo é aplicado aos três termos
         x, y = apply_homography(self.MATRIX, (1000, 500))
         self.assertAlmostEqual(x, 4.75, places=2)
         self.assertAlmostEqual(y, -0.85, places=2)
 
     def test_distancia_no_plano_do_ambiente(self):
-        # 250 px horizontais ≈ 1.0 m com esta matriz
         distancia = ground_distance_m(self.MATRIX, (1000, 500), (1250, 500), 1.0)
         self.assertAlmostEqual(distancia, 1.0, places=2)
 
@@ -156,7 +157,6 @@ class HomographyTest(unittest.TestCase):
         self.assertIsNone(ground_distance_m(None, (0, 0), (1, 1), 1.0))
 
     def test_conversao_de_unidade_do_referencial(self):
-        # a mesma matriz com unidade "cm" devolve a distância em metros
         distancia = ground_distance_m(self.MATRIX, (0, 0), (250, 0), 0.01)
         self.assertAlmostEqual(distancia, 0.01, places=3)
 

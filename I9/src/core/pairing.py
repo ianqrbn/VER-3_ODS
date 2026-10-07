@@ -173,7 +173,6 @@ class PairingModule:
 
         # maior score primeiro; desempate estável por track_id
         scored.sort(key=lambda item: (-item[0], item[1], item[2].track_id))
-        person_by_id = {p.track_id: p for p in persons}
 
         assigned: Dict[int, EquipmentMatch] = {}
         used_persons: set = set()

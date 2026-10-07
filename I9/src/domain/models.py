@@ -457,3 +457,81 @@ class RelationalEvent:
         for item in self.ignored_tracks:
             ids.add(item.track.track_id)
         return ids
+
+
+@dataclass(frozen=True)
+class AnnotatedTrack:
+    """Track de ground truth do dataset anotado (uma linha do CSV)."""
+
+    track_id: int
+    raw_class: str
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+    relational_state: Optional[RelationalState] = None
+
+    @property
+    def bbox(self) -> BoundingBox:
+        return BoundingBox(
+            x_min=self.x_min,
+            y_min=self.y_min,
+            x_max=self.x_max,
+            y_max=self.y_max,
+        )
+
+
+@dataclass(frozen=True)
+class AnnotatedFrame:
+    """Frame anotado com ground truth para calibração."""
+
+    camera_id: str
+    frame: int
+    tracks: Tuple[AnnotatedTrack, ...]
+    homography: Optional[Tuple[Tuple[float, ...], ...]] = None
+
+    def ground_truth_for(self, person_track_id: int, canonical_class: str) -> Optional[RelationalState]:
+        """Ground truth de um par pessoa×EPI.
+
+        Retorna None quando o par não existe no ground truth (ex.: EPI ausente
+        não foi anotado explicitamente).
+        """
+        for track in self.tracks:
+            if track.track_id == person_track_id:
+                continue
+            if track.relational_state is None:
+                continue
+            # Verifica se o track é da classe canônica esperada
+            # (a política mapeia raw_class -> canonical)
+            # Aqui comparamos pelo raw_class diretamente
+            if track.raw_class.lower() == canonical_class.lower():
+                return track.relational_state
+        return None
+
+    def to_tracking_frame(self) -> TrackingFrame:
+        """Converte para TrackingFrame (para rodar o pipeline)."""
+        tracks = []
+        for t in self.tracks:
+            tracks.append({
+                "track_id": t.track_id,
+                "class": t.raw_class,
+                "state": "confirmed",
+                "u_px": (t.x_min + t.x_max) / 2.0,
+                "v_px": (t.y_min + t.y_max) / 2.0,
+                "predicted": False,
+                "bbox": {
+                    "x_min": t.x_min,
+                    "y_min": t.y_min,
+                    "x_max": t.x_max,
+                    "y_max": t.y_max,
+                },
+            })
+        return TrackingFrame.from_payload({
+            "camera_id": self.camera_id,
+            "session_id": f"calib-{self.frame:06d}",
+            "captured_at": utc_now_iso(),
+            "frame": self.frame,
+            "frame_width": 1920,
+            "frame_height": 1080,
+            "tracks": tracks,
+        })

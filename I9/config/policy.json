@@ -7,34 +7,19 @@
       "class": "CAPACETES",
       "aliases": ["capacete", "capacetes", "CAPACETE", "CAPACETES", "helmet"],
       "required": true,
-      "zone": "HEAD",
-      "u_range": [0.28, 0.72],
-      "v_range": [0.72, 1.1],
-      "tolerance_u": 0.18,
-      "tolerance_v": 0.18,
-      "min_association": 0.45
+      "zone": "HEAD"
     },
     {
       "class": "COLETES",
       "aliases": ["colete", "coletes", "COLETE", "COLETES", "vest"],
       "required": true,
-      "zone": "TORSO",
-      "u_range": [0.2, 0.8],
-      "v_range": [0.38, 0.74],
-      "tolerance_u": 0.2,
-      "tolerance_v": 0.16,
-      "min_association": 0.45
+      "zone": "TORSO"
     },
     {
       "class": "LUVAS",
       "aliases": ["luva", "luvas", "LUVA", "LUVAS", "glove"],
       "required": true,
-      "zone": "HANDS",
-      "u_range": [0.02, 0.98],
-      "v_range": [0.1, 0.55],
-      "tolerance_u": 0.15,
-      "tolerance_v": 0.18,
-      "min_association": 0.45
+      "zone": "HANDS"
     }
   ],
   "association": {

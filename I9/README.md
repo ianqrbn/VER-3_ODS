@@ -1,4 +1,4 @@
-# I9 · Inferência relacional de EPI
+# I9 · Verificador de EPI por pessoa
 
 Verificação **geométrica** (sem modelo de visão computacional) do uso de EPI por
 pessoa, a partir das bounding boxes e do rastreio recebidos do **I2**.
@@ -6,6 +6,11 @@ pessoa, a partir das bounding boxes e do rastreio recebidos do **I2**.
 Para cada pessoa e para cada classe de EPI definida na política da aplicação, o
 componente emite um estado relacional — `CORRETO`, `INCORRETO` ou `AUSENTE` —
 com uma porcentagem de confiança e as demais informações recebidas do frame.
+
+O I9 é um verificador **especializado em pessoas**: a anatomia (cabeça, tronco,
+mãos) e sua geometria são conhecimento do motor. A aplicação configura apenas
+*quais* EPIs existem, *quais* são obrigatórios e *em qual zona* cada um deve ser
+usado.
 
 ## Execução
 
@@ -31,7 +36,8 @@ I3  ods.inferencia.calibracao ┘                     (associação)      (estad
   **um-para-um** (EPIs são individuais).
 * `RelationInferenceModule` (`src/core/inference.py`) decide o estado relacional.
 * `CalibrationStore` (`src/core/calibration.py`) valida e guarda a homografia do I3.
-* A política de EPI fica **fora do código**, em `config/policy.json`.
+* `body_zones.py` (`src/domain/body_zones.py`) guarda a geometria do corpo humano.
+* A política fica **fora do código**, em `config/policy.json`.
 
 ## Contratos
 
@@ -170,37 +176,42 @@ Regras do contrato de saída:
 ## Política de EPI (`config/policy.json`)
 
 As classes variam por aplicação (por exemplo, o capacete pode não ser exigido em
-determinados contextos). Para adicionar uma classe nova basta acrescentar uma
-entrada em `equipment`:
+determinados contextos). A configuração é enxuta de propósito: **qual** EPI, **em
+qual zona** e se é **obrigatório**.
 
 ```json
 {
   "class": "CAPACETES",
   "aliases": ["capacete", "capacetes", "CAPACETE", "helmet"],
   "required": true,
-  "zone": "HEAD",
-  "u_range": [0.28, 0.72],
-  "v_range": [0.72, 1.1],
-  "tolerance_u": 0.18,
-  "tolerance_v": 0.18,
-  "min_association": 0.45
+  "zone": "HEAD"
 }
 ```
 
-As zonas são **normalizadas em relação à bounding box da pessoa**:
+Os blocos `association`, `confidence` e `calibration` são opcionais: todos os
+parâmetros têm default no motor e servem apenas para ajuste fino.
+
+### Zonas do corpo
+
+A geometria vive no motor (`src/domain/body_zones.py`), em coordenadas
+normalizadas da bounding box da pessoa:
 
 ```text
-u = (cx_epi − x_min_pessoa) / largura_pessoa     0 = esquerda, 1 = direita
-v = (cy_epi − y_min_pessoa) / altura_pessoa      0 = base,     1 = topo
+u = (cx_epi - x_min_pessoa) / largura_pessoa     0 = esquerda, 1 = direita
+v = (cy_epi - y_min_pessoa) / altura_pessoa      0 = base,     1 = topo
 ```
 
-Como a origem é inferior, a cabeça fica em `v` alto. Zonas default:
+Como a origem é inferior, a cabeça fica em `v` alto:
 
-| Classe | Região | `u` | `v` |
-|---|---|---|---|
-| `CAPACETES` | cabeça | 0.28 – 0.72 | 0.72 – 1.10 |
-| `COLETES` | tronco | 0.20 – 0.80 | 0.38 – 0.74 |
-| `LUVAS` | mãos/quadro | 0.02 – 0.98 | 0.10 – 0.55 |
+| Zona | Região | `u` | `v` | Tolerância |
+|---|---|---|---|---|
+| `HEAD` | cabeça | 0.28 – 0.72 | 0.72 – 1.10 | 0.18 / 0.18 |
+| `TORSO` | tronco | 0.20 – 0.80 | 0.38 – 0.74 | 0.20 / 0.16 |
+| `HANDS` | mãos/quadro | 0.02 – 0.98 | 0.10 – 0.55 | 0.15 / 0.18 |
+
+`HEAD` passa de `v = 1.0` porque um capacete legitamente ultrapassa o topo da
+bounding box da pessoa. Uma zona desconhecida é **erro de configuração**: o
+carregamento falha e a mensagem lista as zonas disponíveis.
 
 ## Regras
 
@@ -232,11 +243,28 @@ Quando o EPI está integralmente contido na pessoa, a associação satura em 100
 a confiança passa a ser determinada essencialmente pelo posicionamento — o que é
 o comportamento esperado para um enquadramento limpo.
 
+## Estendendo
+
+| Mudança | Onde | Exige deploy? |
+|---|---|---|
+| Nova classe de EPI | `config/policy.json` | não |
+| Tornar classe opcional | `config/policy.json` (`required: false`) | não |
+| Novo alias de detecção | `config/policy.json` (`aliases`) | não |
+| Ajuste fino de limiar | `config/policy.json` (`association` / `confidence`) | não |
+| **Nova zona do corpo** | `src/domain/body_zones.py` + teste | **sim** |
+
+Exemplo de classe nova sem tocar em código:
+
+```json
+{ "class": "PROTETORES_AURICULARES", "aliases": ["protetor_auricular"], "required": true, "zone": "HEAD" }
+```
+
 ## Limitações conhecidas
 
 * Bounding boxes não distinguem EPI **usado** de EPI **segurado** próximo ao corpo.
 * Uma zona é um retângulo único: classes com dois pontos de uso (luvas nas duas
-  mãos, protetor auricular nas duas orelhas) exigirão regras por região.
+  mãos, protetor auricular nas duas orelhas) ficam representadas por uma região
+  única e precisam de refinamento.
 * `AUSENTE` não distingue oclusão de ausência real — por isso a confiança é
   limitada e o I2 deve consolidar o estado pela contagem de quadros.
 * Distinguir uso real de coincidência geométrica pode exigir keypoints, pose,

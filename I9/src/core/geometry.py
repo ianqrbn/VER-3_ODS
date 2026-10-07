@@ -11,8 +11,8 @@ from __future__ import annotations
 import math
 from typing import Optional, Sequence, Tuple
 
+from src.domain.body_zones import ZoneGeometry
 from src.domain.models import BoundingBox
-from src.domain.policy import ZoneRule
 
 
 def normalized_position(track_bbox: BoundingBox, person_bbox: BoundingBox) -> Tuple[float, float]:
@@ -56,23 +56,23 @@ def person_relative_proximity(
     return horizontal * vertical
 
 
-def zone_score(u: float, v: float, rule: ZoneRule) -> float:
-    """Score de posicionamento em [0, 1] para a zona esperada de uma classe.
+def zone_score(u: float, v: float, zone: ZoneGeometry) -> float:
+    """Score de posicionamento em [0, 1] para a zona esperada de um EPI.
 
     Dentro da zona o score varia de 0.70 (na borda) a 1.00 (no centro); fora da
-    zona decai linearmente até zero, ao longo da tolerância configurada. O
-    decaimento é isotrópico nas tolerâncias, evitando "degraus" entre eixos.
+    zona decai linearmente até zero, ao longo da tolerância da zona. O decaimento
+    é isotrópico nas tolerâncias, evitando "degraus" entre eixos.
     """
-    du = max(rule.u_min - u, 0.0, u - rule.u_max)
-    dv = max(rule.v_min - v, 0.0, v - rule.v_max)
+    du = max(zone.u_min - u, 0.0, u - zone.u_max)
+    dv = max(zone.v_min - v, 0.0, v - zone.v_max)
 
     if du == 0.0 and dv == 0.0:
-        margin = min(u - rule.u_min, rule.u_max - u, v - rule.v_min, rule.v_max - v)
-        half_span = min((rule.u_max - rule.u_min) / 2.0, (rule.v_max - rule.v_min) / 2.0)
+        margin = min(u - zone.u_min, zone.u_max - u, v - zone.v_min, zone.v_max - v)
+        half_span = min((zone.u_max - zone.u_min) / 2.0, (zone.v_max - zone.v_min) / 2.0)
         interior = min(1.0, margin / half_span) if half_span > 0 else 1.0
         return 0.70 + 0.30 * interior
 
-    normalized = math.hypot(du / rule.tolerance_u, dv / rule.tolerance_v)
+    normalized = math.hypot(du / zone.tolerance_u, dv / zone.tolerance_v)
     return 0.70 * max(0.0, 1.0 - normalized)
 
 

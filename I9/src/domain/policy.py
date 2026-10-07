@@ -1,14 +1,15 @@
 """
-Política de verificação geométrica: define, por aplicação, quais classes de EPI
-existem, quais são obrigatórias e onde cada uma deve estar em relação à pessoa.
+Política de EPI: define, por aplicação, quais classes de equipamento existem,
+quais são obrigatórias e em qual **zona do corpo** cada uma deve ser usada.
 
-As zonas usam coordenadas **normalizadas** da bounding box da pessoa, com a
-origem do I2 (canto inferior esquerdo, máximos exclusivos):
+A geometria de cada zona não vive aqui: é conhecimento de domínio do verificador e
+está em `src/domain/body_zones.py`. A configuração carrega apenas a referência,
+por exemplo:
 
-    u = (cx_epi - x_min_pessoa) / largura_pessoa    (0 = esquerda, 1 = direita)
-    v = (cy_epi - y_min_pessoa) / altura_pessoa     (0 = base, 1 = topo da cabeça)
+    { "class": "CAPACETES", "zone": "HEAD", "required": true, "aliases": [...] }
 
-Assim, a cabeça fica próxima de `v = 1`.
+Os parâmetros numéricos de associação e de confiança continuam disponíveis para
+ajuste fino, mas todos têm default no motor e são opcionais.
 """
 
 from __future__ import annotations
@@ -18,15 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-
-def _interval(data: Mapping[str, Any], key: str, context: str) -> Tuple[float, float]:
-    values = data[key]
-    if not isinstance(values, (list, tuple)) or len(values) != 2:
-        raise ValueError(f"{context}.{key}: esperado [min, max]")
-    lo, hi = float(values[0]), float(values[1])
-    if hi <= lo:
-        raise ValueError(f"{context}.{key}: esperado max > min")
-    return lo, hi
+from src.domain.body_zones import BodyZone, ZoneGeometry, get_zone, resolve_zone
 
 
 def _ratio(data: Mapping[str, Any], key: str, context: str, default: float) -> float:
@@ -43,58 +36,44 @@ def _weight(data: Mapping[str, Any], key: str, context: str, default: float) -> 
     return value
 
 
-@dataclass(frozen=True)
-class ZoneRule:
-    """Zona esperada (e tolerâncias) de uma classe de EPI, em coordenadas da pessoa."""
-
-    canonical_class: str
-    zone: str
-    u_min: float
-    u_max: float
-    v_min: float
-    v_max: float
-    tolerance_u: float = 0.18
-    tolerance_v: float = 0.16
-    min_association: float = 0.45
-    required: bool = True
-    aliases: Tuple[str, ...] = ()
-
-    @property
-    def center(self) -> Tuple[float, float]:
-        return ((self.u_min + self.u_max) / 2.0, (self.v_min + self.v_max) / 2.0)
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any], context: str) -> "ZoneRule":
-        canonical = str(data["class"])
-        ctx = f"{context}.{canonical}"
-        u_min, u_max = _interval(data, "u_range", ctx)
-        v_min, v_max = _interval(data, "v_range", ctx)
-        tolerance_u = float(data.get("tolerance_u", 0.18))
-        tolerance_v = float(data.get("tolerance_v", 0.16))
-        if tolerance_u <= 0 or tolerance_v <= 0:
-            raise ValueError(f"{ctx}: tolerâncias devem ser positivas")
-
-        aliases = tuple(str(a) for a in data.get("aliases", ()))
-        return cls(
-            canonical_class=canonical,
-            zone=str(data.get("zone", canonical)),
-            u_min=u_min,
-            u_max=u_max,
-            v_min=v_min,
-            v_max=v_max,
-            tolerance_u=tolerance_u,
-            tolerance_v=tolerance_v,
-            min_association=_ratio(data, "min_association", ctx, 0.45),
-            required=bool(data.get("required", True)),
-            aliases=aliases,
-        )
-
-
 def _positive(data: Mapping[str, Any], key: str, context: str, default: float) -> float:
     value = float(data.get(key, default))
     if value <= 0.0:
         raise ValueError(f"{context}.{key}: esperado valor positivo")
     return value
+
+
+@dataclass(frozen=True)
+class ZoneRule:
+    """Regra de uma classe de EPI: qual zona do corpo ela deve ocupar."""
+
+    canonical_class: str
+    zone: BodyZone
+    required: bool = True
+    min_association: float = 0.45
+    aliases: Tuple[str, ...] = ()
+
+    @property
+    def geometry(self) -> ZoneGeometry:
+        """Geometria da zona, resolvida no registro do motor."""
+        return get_zone(self.zone)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any], context: str) -> "ZoneRule":
+        if "class" not in data:
+            raise ValueError(f"{context}.equipment: campo obrigatório ausente -> 'class'")
+        canonical = str(data["class"])
+        ctx = f"{context}.{canonical}"
+        if "zone" not in data:
+            raise ValueError(f"{ctx}: campo obrigatório ausente -> 'zone'")
+
+        return cls(
+            canonical_class=canonical,
+            zone=resolve_zone(data["zone"]),
+            required=bool(data.get("required", True)),
+            min_association=_ratio(data, "min_association", ctx, 0.45),
+            aliases=tuple(str(a) for a in data.get("aliases", ())),
+        )
 
 
 @dataclass(frozen=True)
@@ -192,6 +171,7 @@ class EquipmentPolicy:
     confidence: ConfidenceSettings
     calibration: CalibrationSettings
     alias_map: Mapping[str, str] = field(default_factory=dict)
+    custom_zones: Mapping[BodyZone, ZoneGeometry] = field(default_factory=dict)
 
     def canonical_for(self, raw_class: str) -> Optional[str]:
         """Classe canônica de um rótulo bruto vindo do I2 (case-insensitive)."""
@@ -203,6 +183,10 @@ class EquipmentPolicy:
     def rule_for(self, raw_class: str) -> Optional[ZoneRule]:
         canonical = self.canonical_for(raw_class)
         return self.rules.get(canonical) if canonical else None
+
+    def zone_for(self, raw_class: str) -> Optional[BodyZone]:
+        rule = self.rule_for(raw_class)
+        return rule.zone if rule else None
 
     def required_classes(self) -> Tuple[str, ...]:
         return tuple(c for c in self.class_order if self.rules[c].required)
@@ -241,6 +225,24 @@ class EquipmentPolicy:
             if person_class in alias_map:
                 raise ValueError(f"policy: {person_class!r} é pessoa e não pode ser classe de EPI")
 
+        # Processa zonas customizadas (para calibração)
+        custom_zones: Dict[BodyZone, ZoneGeometry] = {}
+        zones_raw = data.get("zones", {})
+        if isinstance(zones_raw, dict):
+            for zone_name, zone_data in zones_raw.items():
+                try:
+                    zone = resolve_zone(zone_name)
+                    custom_zones[zone] = ZoneGeometry(
+                        u_min=float(zone_data["u_min"]),
+                        u_max=float(zone_data["u_max"]),
+                        v_min=float(zone_data["v_min"]),
+                        v_max=float(zone_data["v_max"]),
+                        tolerance_u=float(zone_data.get("tolerance_u", 0.18)),
+                        tolerance_v=float(zone_data.get("tolerance_v", 0.16)),
+                    )
+                except (KeyError, ValueError) as exc:
+                    raise ValueError(f"policy.zones.{zone_name}: {exc}") from exc
+
         return cls(
             policy_id=str(data.get("policy_id", "default")),
             version=str(data.get("version", "1.0")),
@@ -251,6 +253,7 @@ class EquipmentPolicy:
             confidence=ConfidenceSettings.from_dict(data.get("confidence", {}), "policy.confidence"),
             calibration=CalibrationSettings.from_dict(data.get("calibration", {}), "policy.calibration"),
             alias_map=alias_map,
+            custom_zones=custom_zones,
         )
 
     @classmethod
