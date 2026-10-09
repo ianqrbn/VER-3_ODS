@@ -78,16 +78,16 @@ class ZoneRule:
 
 @dataclass(frozen=True)
 class AssociationSettings:
-    """Pesos e limites da associação pessoa <-> EPI.
+    """Configurações da associação pessoa <-> EPI.
 
-    A distância métrica (homografia) entra como **corte** e não como score: como
-    a H projeta o chão, um capacete na cabeça cai longe do ponto do tronco e
-    penalizaria a associação. Por isso `weight_ground` é 0 por padrão e
-    `ground_radius_m` é generoso.
+    A associação usa distância radial (Euclidiana) entre centroides normalizada
+    pela diagonal da bbox da pessoa, com decaimento gaussiano controlado por
+    `radial_sigma`.
     """
 
-    weight_overlap: float = 0.60
-    weight_proximity: float = 0.40
+    radial_sigma: float = 0.80  # controle do raio de captura (em múltiplos da diagonal)
+    weight_overlap: float = 0.60  # legado: não usado na associação radial
+    weight_proximity: float = 0.40  # legado: não usado na associação radial
     weight_ground: float = 0.0
     expand_x: float = 0.20
     expand_y: float = 0.10
@@ -99,6 +99,7 @@ class AssociationSettings:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], context: str) -> "AssociationSettings":
         settings = cls(
+            radial_sigma=_positive(data, "radial_sigma", context, 0.80),
             weight_overlap=_weight(data, "weight_overlap", context, 0.60),
             weight_proximity=_weight(data, "weight_proximity", context, 0.40),
             weight_ground=_weight(data, "weight_ground", context, 0.0),

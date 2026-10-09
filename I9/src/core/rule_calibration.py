@@ -91,9 +91,10 @@ class CalibrationResult:
 class RuleCalibrationModule:
     """Calibra parâmetros das regras geométricas por grid search em etapas."""
 
-    def __init__(self, base_policy: EquipmentPolicy):
+    def __init__(self, base_policy: EquipmentPolicy, is_coco: bool = False):
         self.base_policy = base_policy
-        self.evaluator = EvaluationModule(base_policy)
+        self.is_coco = is_coco
+        self.evaluator = EvaluationModule(base_policy, is_coco=is_coco)
 
     def calibrate(
         self,

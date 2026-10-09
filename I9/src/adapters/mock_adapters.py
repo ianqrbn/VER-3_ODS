@@ -100,34 +100,32 @@ class MockIngestionAdapter:
         colete_1 = _track(102, "colete", 430, 346, 220, 200)
 
         # Pessoa 2: capacete previsto (predicted) no primeiro quadro, confirmado depois.
+        # Pessoa 2 não tem colete no primeiro quadro -> AUSENTE.
         pessoa_2 = _track(57, "pessoa", 1100, 300, 220, 680)
         capacete_2 = _track(201, "capacete", 1147, 864, 134, 150, "predicted")
-        colete_2 = _track(202, "colete", 1130, 580, 160, 200)
 
         # EPI detectado longe de qualquer pessoa: deve sair em unassociated_equipment.
         capacete_perdido = _track(301, "capacete", 1600, 200, 100, 120)
 
         if index == 1:
-            return [pessoa_1, capacete_1, colete_1, pessoa_2, capacete_2, colete_2, capacete_perdido]
+            return [pessoa_1, capacete_1, colete_1, pessoa_2, capacete_2, capacete_perdido]
 
         if index == 2:
-            # luvas surge na pessoa 1 e o capacete da pessoa 2 é confirmado
-            luvas_1 = _track(103, "luvas", 415, 545, 50, 70)
+            # colete 2 surge e o capacete da pessoa 2 é confirmado
+            colete_2 = _track(202, "colete", 1130, 580, 160, 200)
             capacete_2_confirmado = _track(201, "capacete", 1147, 864, 134, 150, "confirmed")
             return [
                 pessoa_1,
                 capacete_1,
                 colete_1,
-                luvas_1,
                 pessoa_2,
                 capacete_2_confirmado,
                 colete_2,
                 capacete_perdido,
             ]
 
-        # quadro 3: colete 2 perdido pelo tracker e luvas da pessoa 2 na altura da cabeça
+        # quadro 3: colete 2 perdido pelo tracker
         colete_2_lost = _track(202, "colete", 1130, 580, 160, 200, "lost")
-        luvas_2 = _track(203, "luvas", 1290, 877, 50, 70)
         return [
             pessoa_1,
             capacete_1,
@@ -135,7 +133,6 @@ class MockIngestionAdapter:
             pessoa_2,
             capacete_2,
             colete_2_lost,
-            luvas_2,
             capacete_perdido,
         ]
 

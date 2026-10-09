@@ -1,0 +1,66 @@
+{
+  "policy_id": "default",
+  "version": "1.0",
+  "person_classes": [
+    "pessoa",
+    "person",
+    "pessoas",
+    "safe worker",
+    "unsafe worker",
+    "worker -only hat-",
+    "worker -only vest-"
+  ],
+  "equipment": [
+    {
+      "class": "CAPACETES",
+      "zone": "HEAD",
+      "required": true,
+      "min_association": 0.45,
+      "aliases": [
+        "capacete",
+        "capacetes",
+        "CAPACETE",
+        "CAPACETES",
+        "helmet",
+        "hardhat"
+      ]
+    },
+    {
+      "class": "COLETES",
+      "zone": "TORSO",
+      "required": true,
+      "min_association": 0.45,
+      "aliases": [
+        "colete",
+        "coletes",
+        "COLETE",
+        "COLETES",
+        "vest"
+      ]
+    }
+  ],
+  "association": {
+    "weight_overlap": 0.5,
+    "weight_proximity": 0.3,
+    "weight_ground": 0.0,
+    "expand_x": 0.2,
+    "expand_y": 0.1,
+    "proximity_sigma_u": 0.4,
+    "proximity_tolerance_v": 0.2,
+    "ground_radius_m": 4.0,
+    "use_ground": true
+  },
+  "confidence": {
+    "correct_threshold": 0.7,
+    "predicted_factor": 0.7,
+    "unknown_state_factor": 0.5,
+    "absence_base": 0.55,
+    "absence_max": 0.7,
+    "absence_candidate_penalty": 0.85,
+    "max_confidence": 0.95
+  },
+  "calibration": {
+    "max_reprojection_rms_cm": 5.0,
+    "min_holdout_points": 4
+  }
+}

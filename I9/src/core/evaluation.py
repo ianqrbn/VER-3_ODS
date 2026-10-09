@@ -96,8 +96,9 @@ class EvaluationResult:
 class EvaluationModule:
     """Compara predições do pipeline com ground truth annotado."""
 
-    def __init__(self, policy: Any):
+    def __init__(self, policy: Any, is_coco: bool = False):
         self.policy = policy
+        self.is_coco = is_coco
 
     def evaluate(
         self,
@@ -129,7 +130,10 @@ class EvaluationModule:
                 continue
 
             # Mapeia ground truth por (person_track_id, canonical_class)
-            gt_map = self._build_gt_map(gt)
+            if self.is_coco:
+                gt_map = self._build_gt_map_coco(gt)
+            else:
+                gt_map = self._build_gt_map(gt)
 
             for person_eval in pred.relations:
                 for equip_eval in person_eval.equipment:
@@ -193,5 +197,65 @@ class EvaluationModule:
                 canonical = self.policy.canonical_for(epi.raw_class)
                 if canonical:
                     result[(person.track_id, canonical)] = epi.relational_state
+
+        return result
+
+    def _build_gt_map_coco(
+        self, gt: AnnotatedFrame
+    ) -> Dict[Tuple[int, str], RelationalState]:
+        """Mapeia (person_track_id, canonical_class) -> RelationalState para dataset COCO.
+
+        No formato COCO, o ground truth é inferido baseado na classe de worker
+        e na presença/ausência de equipamentos na imagem.
+
+        Prioridade de classes de worker:
+          1. Unsafe Worker (maior prioridade)
+          2. Worker -only hat-
+          3. Worker -only vest-
+          4. Safe Worker (menor prioridade)
+        """
+        from src.adapters.coco_dataset_adapter import (
+            WORKER_CATEGORIES,
+            EQUIPMENT_CATEGORIES,
+            WORKER_PRIORITY,
+        )
+
+        result: Dict[Tuple[int, str], RelationalState] = {}
+
+        # Separa workers e equipamentos
+        workers = [t for t in gt.tracks if t.raw_class in WORKER_CATEGORIES]
+        equipments = [t for t in gt.tracks if t.raw_class in EQUIPMENT_CATEGORIES]
+
+        if not workers:
+            return result
+
+        # Determina classe de worker (prioridade)
+        worker_class = max(workers, key=lambda w: WORKER_PRIORITY.get(w.raw_class, 0)).raw_class
+
+        # Mapeia equipamentos por classe canônica
+        has_hardhat = any(eq.raw_class == "hardhat" for eq in equipments)
+        has_vest = any(eq.raw_class == "vest" for eq in equipments)
+
+        # Infer ground truth para cada worker
+        for worker in workers:
+            if worker_class == "Unsafe Worker":
+                # Unsafe Worker: equipamento presente -> INCORRETO, ausente -> AUSENTE
+                result[(worker.track_id, "CAPACETES")] = RelationalState.INCORRETO if has_hardhat else RelationalState.AUSENTE
+                result[(worker.track_id, "COLETES")] = RelationalState.INCORRETO if has_vest else RelationalState.AUSENTE
+
+            elif worker_class == "Worker -only hat-":
+                # Só com capacete: capacete CORRETO, colete AUSENTE
+                result[(worker.track_id, "CAPACETES")] = RelationalState.CORRETO if has_hardhat else RelationalState.AUSENTE
+                result[(worker.track_id, "COLETES")] = RelationalState.AUSENTE
+
+            elif worker_class == "Worker -only vest-":
+                # Só com colete: capacete AUSENTE, colete CORRETO
+                result[(worker.track_id, "CAPACETES")] = RelationalState.AUSENTE
+                result[(worker.track_id, "COLETES")] = RelationalState.CORRETO if has_vest else RelationalState.AUSENTE
+
+            elif worker_class == "Safe Worker":
+                # Safe Worker: equipamento presente -> CORRETO, ausente -> AUSENTE
+                result[(worker.track_id, "CAPACETES")] = RelationalState.CORRETO if has_hardhat else RelationalState.AUSENTE
+                result[(worker.track_id, "COLETES")] = RelationalState.CORRETO if has_vest else RelationalState.AUSENTE
 
         return result

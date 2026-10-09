@@ -6,7 +6,8 @@ Fluxo: evento de rastreio (I3) -> associação pessoa/EPI -> estado relacional
 
 Modos de execução:
     python3 main.py                          # modo normal (mock)
-    python3 main.py --calibrate --dataset dataset.csv  # modo calibração
+    python3 main.py --calibrate --format csv --dataset dataset.csv  # calibração CSV
+    python3 main.py --calibrate --format coco --dataset "PPE detection.f.v9i.coco"  # calibração COCO
 """
 
 from pathlib import Path
@@ -50,9 +51,16 @@ def build_pipeline(max_frames: int = 3, as_json: bool = False) -> I9Pipeline:
     )
 
 
-def run_calibration(dataset_path: str, output_path: str = "policy_calibrated.json") -> None:
-    """Executa calibração das regras geométricas usando dataset anotado."""
+def run_calibration(
+    dataset_path: str,
+    output_path: str = "policy_calibrated.json",
+    format: str = "csv",
+    split: str = "train",
+    max_frames: int = 200,
+) -> None:
+    """Executa calibração das regras geométricas usando dataset annotado."""
     from src.adapters.csv_dataset_adapter import CsvDatasetAdapter
+    from src.adapters.coco_dataset_adapter import CocoDatasetAdapter
     from src.core.rule_calibration import RuleCalibrationModule
 
     # Carrega política base
@@ -60,51 +68,55 @@ def run_calibration(dataset_path: str, output_path: str = "policy_calibrated.jso
     base_policy = EquipmentPolicy.from_file(POLICY_PATH)
 
     # Carrega dataset
-    print(f"Carregando dataset: {dataset_path}")
-    adapter = CsvDatasetAdapter()
-    dataset = adapter.load(dataset_path)
+    print(f"Carregando dataset: {dataset_path} (formato: {format})")
+    if format == "coco":
+        adapter = CocoDatasetAdapter()
+        dataset = adapter.load(dataset_path, split=split)
+        is_coco = True
+    else:
+        adapter = CsvDatasetAdapter()
+        dataset = adapter.load(dataset_path)
+        is_coco = False
     print(f"  {len(dataset)} frame(s) carregado(s)")
+
+    # Subamostra se necessário (para viabilidade em datasets grandes)
+    if len(dataset) > max_frames:
+        step = len(dataset) / max_frames
+        dataset = [dataset[int(i * step)] for i in range(max_frames)]
+        print(f"  Subamostrado para {len(dataset)} frame(s) para calibração")
 
     # Define grid de parâmetros
     param_grid = {
-        "correct_threshold": [0.60, 0.65, 0.70, 0.75, 0.80, 0.85],
-        "weight_overlap": [0.4, 0.5, 0.6, 0.7, 0.8],
-        "weight_proximity": [0.2, 0.3, 0.4, 0.5, 0.6],
-        "proximity_sigma_u": [0.3, 0.4, 0.5, 0.6, 0.7],
-        "proximity_tolerance_v": [0.15, 0.20, 0.25, 0.30, 0.35],
-        "absence_base": [0.50, 0.55, 0.62, 0.70, 0.80],
+        "correct_threshold": [0.70, 0.75, 0.80],
+        "weight_overlap": [0.5, 0.6, 0.7],
+        "weight_proximity": [0.3, 0.4, 0.5],
+        "proximity_sigma_u": [0.4, 0.5, 0.6],
+        "proximity_tolerance_v": [0.20, 0.25, 0.30],
+        "absence_base": [0.55, 0.62, 0.70],
     }
 
     zones = {
         "HEAD": {
-            "u_min": [0.20, 0.25, 0.28, 0.32, 0.35],
-            "u_max": [0.65, 0.70, 0.72, 0.78, 0.80],
-            "v_min": [0.65, 0.70, 0.72, 0.75, 0.80],
-            "v_max": [1.00, 1.05, 1.10, 1.15],
-            "tolerance_u": [0.15, 0.18, 0.20, 0.22],
-            "tolerance_v": [0.15, 0.18, 0.20, 0.22],
+            "u_min": [0.25, 0.28, 0.32],
+            "u_max": [0.68, 0.72, 0.76],
+            "v_min": [0.68, 0.72, 0.76],
+            "v_max": [1.05, 1.10, 1.15],
+            "tolerance_u": [0.15, 0.18],
+            "tolerance_v": [0.15, 0.18],
         },
         "TORSO": {
-            "u_min": [0.15, 0.20, 0.25, 0.30],
-            "u_max": [0.70, 0.75, 0.80, 0.85],
-            "v_min": [0.30, 0.35, 0.38, 0.42, 0.45],
-            "v_max": [0.70, 0.72, 0.74, 0.78, 0.80],
-            "tolerance_u": [0.15, 0.20, 0.22, 0.25],
-            "tolerance_v": [0.12, 0.16, 0.18, 0.20],
-        },
-        "HANDS": {
-            "u_min": [0.00, 0.02, 0.05, 0.10],
-            "u_max": [0.90, 0.95, 0.98, 1.00],
-            "v_min": [0.05, 0.10, 0.15, 0.20],
-            "v_max": [0.45, 0.50, 0.55, 0.60],
-            "tolerance_u": [0.10, 0.15, 0.18, 0.20],
-            "tolerance_v": [0.15, 0.18, 0.20, 0.22],
+            "u_min": [0.18, 0.20, 0.25],
+            "u_max": [0.75, 0.80, 0.85],
+            "v_min": [0.35, 0.38, 0.42],
+            "v_max": [0.70, 0.74, 0.78],
+            "tolerance_u": [0.18, 0.20],
+            "tolerance_v": [0.14, 0.16],
         },
     }
 
     # Executa calibração
     print(f"Iniciando calibração com {len(param_grid)} parâmetros...")
-    calibrator = RuleCalibrationModule(base_policy)
+    calibrator = RuleCalibrationModule(base_policy, is_coco=is_coco)
     result = calibrator.calibrate(dataset, param_grid, zones)
 
     # Salva resultados
@@ -130,23 +142,40 @@ def main() -> None:
     parser.add_argument(
         "--calibrate",
         action="store_true",
-        help="Executa modo de calibração com dataset anotado",
+        help="Executa modo de calibração com dataset annotado",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["csv", "coco"],
+        default="csv",
+        help="Formato do dataset (padrão: csv)",
+    )
+    parser.add_argument(
+        "--split",
+        default="train",
+        help="Split do dataset COCO a carregar (padrão: train)",
     )
     parser.add_argument(
         "--dataset",
-        help="Caminho para o CSV anotado (obrigatório com --calibrate)",
+        help="Caminho para o dataset (obrigatório com --calibrate)",
     )
     parser.add_argument(
         "--output",
         default="policy_calibrated.json",
         help="Caminho para o policy.json calibrado (padrão: policy_calibrated.json)",
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=200,
+        help="Número máximo de frames para calibração (padrão: 200)",
+    )
     args = parser.parse_args()
 
     if args.calibrate:
         if not args.dataset:
             parser.error("--calibrate requer --dataset")
-        run_calibration(args.dataset, args.output)
+        run_calibration(args.dataset, args.output, format=args.format, split=args.split, max_frames=args.max_frames)
         return
 
     print("Iniciando Componente I9 (verificação geométrica)...")

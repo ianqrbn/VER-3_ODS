@@ -39,14 +39,13 @@ class PolicyLoadingTest(unittest.TestCase):
     def test_politica_padrao_do_projeto(self):
         policy = default_policy()
         self.assertEqual(policy.policy_id, "default")
-        self.assertEqual(policy.class_order, ("CAPACETES", "COLETES", "LUVAS"))
-        self.assertEqual(policy.required_classes(), ("CAPACETES", "COLETES", "LUVAS"))
+        self.assertEqual(policy.class_order, ("CAPACETES", "COLETES"))
+        self.assertEqual(policy.required_classes(), ("CAPACETES", "COLETES"))
 
     def test_zonas_associadas_as_classes(self):
         policy = default_policy()
         self.assertIs(policy.zone_for("capacete"), BodyZone.HEAD)
         self.assertIs(policy.zone_for("colete"), BodyZone.TORSO)
-        self.assertIs(policy.zone_for("luvas"), BodyZone.HANDS)
         self.assertIsNone(policy.zone_for("protetor_auricular"))
 
     def test_geometria_vem_do_motor(self):

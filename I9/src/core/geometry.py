@@ -59,21 +59,25 @@ def person_relative_proximity(
 def zone_score(u: float, v: float, zone: ZoneGeometry) -> float:
     """Score de posicionamento em [0, 1] para a zona esperada de um EPI.
 
-    Dentro da zona o score varia de 0.70 (na borda) a 1.00 (no centro); fora da
-    zona decai linearmente até zero, ao longo da tolerância da zona. O decaimento
-    é isotrópico nas tolerâncias, evitando "degraus" entre eixos.
+    Dentro da zona o score varia de 0.70 (na borda) a 1.00 (no centro). Fora da
+    zona, usa decaimento gaussiano suave ao longo da tolerância da zona, criando
+    uma margem de confiança mais orgânica.
     """
     du = max(zone.u_min - u, 0.0, u - zone.u_max)
     dv = max(zone.v_min - v, 0.0, v - zone.v_max)
 
     if du == 0.0 and dv == 0.0:
+        # Dentro da zona: score de 0.70 (borda) a 1.00 (centro)
         margin = min(u - zone.u_min, zone.u_max - u, v - zone.v_min, zone.v_max - v)
         half_span = min((zone.u_max - zone.u_min) / 2.0, (zone.v_max - zone.v_min) / 2.0)
         interior = min(1.0, margin / half_span) if half_span > 0 else 1.0
         return 0.70 + 0.30 * interior
 
-    normalized = math.hypot(du / zone.tolerance_u, dv / zone.tolerance_v)
-    return 0.70 * max(0.0, 1.0 - normalized)
+    # Fora da zona: decaimento gaussiano suave
+    sigma_u = zone.tolerance_u
+    sigma_v = zone.tolerance_v
+    normalized_sq = (du / sigma_u) ** 2 + (dv / sigma_v) ** 2
+    return 0.70 * math.exp(-0.5 * normalized_sq)
 
 
 def overlap_score(candidate: BoundingBox, person: BoundingBox, expand_x: float, expand_y: float) -> float:

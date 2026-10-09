@@ -17,6 +17,7 @@ corrente. A ausência é tratada na inferência, não aqui.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Tuple
 
 from src.core.calibration import CalibrationStore
@@ -116,37 +117,33 @@ class PairingModule:
         matrix,
         meters_per_unit: float,
     ) -> Tuple[float, Optional[float]]:
-        """Score de associação em [0, 1] e a distância métrica (quando houver H).
+        """Score de associação em [0, 1] baseado em distância radial (Euclidiana).
 
-        A distância no plano do ambiente é usada apenas como corte: um EPI no alto
-        do corpo se projeta longe do ponto do tronco, então penalizá-la por
-        distância reduziria a confiança de capacetes e coletes corretos.
+        A associação agora confia na distância radial entre centroides normalizada
+        pela diagonal da bbox da pessoa, sem usar overlap de bounding box.
         """
         settings = self.policy.association
 
-        overlap = overlap_score(candidate.bbox, person.bbox, settings.expand_x, settings.expand_y)
-        u, v = normalized_position(candidate.bbox, person.bbox)
-        proximity = person_relative_proximity(
-            u, v, settings.proximity_sigma_u, settings.proximity_tolerance_v
-        )
+        # Distância Euclidiana entre centroides
+        dx = candidate.bbox.center_x - person.bbox.center_x
+        dy = candidate.bbox.center_y - person.bbox.center_y
+        distance = math.sqrt(dx * dx + dy * dy)
 
+        # Normaliza pela diagonal da bbox da pessoa
+        diagonal = math.sqrt(person.bbox.width ** 2 + person.bbox.height ** 2)
+        if diagonal == 0:
+            return 0.0, None
+        normalized_distance = distance / diagonal
+
+        # Score gaussiano: 1.0 quando distância = 0, decai suavemente
+        sigma = settings.radial_sigma
+        score = math.exp(-0.5 * (normalized_distance / sigma) ** 2)
+
+        # Distância métrica (para informação, não usada no score)
         ground_m: Optional[float] = None
-        ground_score: Optional[float] = None
         if matrix is not None:
             ground_m = ground_distance_m(matrix, person.center, candidate.center, meters_per_unit)
-            if settings.use_ground and ground_m is not None and ground_m > settings.ground_radius_m:
-                return 0.0, ground_m  # fora do alcance físico da pessoa
-            if ground_m is not None and settings.weight_ground > 0:
-                ground_score = max(0.0, 1.0 - ground_m / settings.ground_radius_m)
 
-        weights = [(settings.weight_overlap, overlap), (settings.weight_proximity, proximity)]
-        if ground_score is not None:
-            weights.append((settings.weight_ground, ground_score))
-
-        total_weight = sum(weight for weight, _ in weights)
-        if total_weight <= 0:
-            return 0.0, ground_m
-        score = sum(weight * value for weight, value in weights) / total_weight
         return min(1.0, max(0.0, score)), ground_m
 
     def _match_class(

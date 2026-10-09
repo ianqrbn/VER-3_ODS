@@ -1,11 +1,11 @@
 {
   "policy_id": "default",
   "version": "1.0",
-  "person_classes": ["pessoa", "person", "pessoas"],
+  "person_classes": ["pessoa", "person", "pessoas", "safe worker", "unsafe worker", "worker -only hat-", "worker -only vest-"],
   "equipment": [
     {
       "class": "CAPACETES",
-      "aliases": ["capacete", "capacetes", "CAPACETE", "CAPACETES", "helmet"],
+      "aliases": ["capacete", "capacetes", "CAPACETE", "CAPACETES", "helmet", "hardhat"],
       "required": true,
       "zone": "HEAD"
     },
@@ -14,12 +14,6 @@
       "aliases": ["colete", "coletes", "COLETE", "COLETES", "vest"],
       "required": true,
       "zone": "TORSO"
-    },
-    {
-      "class": "LUVAS",
-      "aliases": ["luva", "luvas", "LUVA", "LUVAS", "glove"],
-      "required": true,
-      "zone": "HANDS"
     }
   ],
   "association": {

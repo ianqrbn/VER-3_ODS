@@ -2,10 +2,11 @@
 Script standalone de calibração das regras geométricas.
 
 Uso:
-    python3 calibrate.py --dataset dataset.csv --output policy_calibrated.json
+    python3 calibrate.py --format csv --dataset dataset.csv --output policy_calibrated.json
+    python3 calibrate.py --format coco --dataset "PPE detection.f.v9i.coco" --output policy_calibrated.json
 
 Fluxo:
-    1. Carrega CSV via CsvDatasetAdapter
+    1. Carrega dataset (CSV ou COCO JSON)
     2. Define o grid de parâmetros
     3. Roda RuleCalibrationModule.calibrate()
     4. Salva o melhor policy.json + relatório de calibração
@@ -21,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.adapters.csv_dataset_adapter import CsvDatasetAdapter
+from src.adapters.coco_dataset_adapter import CocoDatasetAdapter
 from src.core.rule_calibration import RuleCalibrationModule
 from src.domain.policy import EquipmentPolicy
 
@@ -53,15 +55,10 @@ DEFAULT_ZONES = {
         "tolerance_u": [0.18, 0.20],
         "tolerance_v": [0.14, 0.16],
     },
-    "HANDS": {
-        "u_min": [0.00, 0.02, 0.05],
-        "u_max": [0.95, 0.98, 1.00],
-        "v_min": [0.08, 0.10, 0.15],
-        "v_max": [0.50, 0.55, 0.60],
-        "tolerance_u": [0.12, 0.15],
-        "tolerance_v": [0.15, 0.18],
-    },
 }
+
+# Número máximo de frames para calibração (subamostragem para viabilidade)
+DEFAULT_MAX_FRAMES = 200
 
 
 def main() -> None:
@@ -69,9 +66,20 @@ def main() -> None:
         description="Calibra regras geométricas do I9 usando dataset anotado"
     )
     parser.add_argument(
+        "--format",
+        choices=["csv", "coco"],
+        default="csv",
+        help="Formato do dataset (padrão: csv)",
+    )
+    parser.add_argument(
         "--dataset",
         required=True,
-        help="Caminho para o CSV anotado",
+        help="Caminho para o dataset (CSV ou diretório COCO)",
+    )
+    parser.add_argument(
+        "--split",
+        default="train",
+        help="Split do dataset COCO a carregar (padrão: train)",
     )
     parser.add_argument(
         "--output",
@@ -92,6 +100,12 @@ def main() -> None:
         "--grid",
         help="Caminho para JSON com grid de parâmetros customizado (opcional)",
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=DEFAULT_MAX_FRAMES,
+        help=f"Número máximo de frames para calibração (padrão: {DEFAULT_MAX_FRAMES})",
+    )
     args = parser.parse_args()
 
     # Carrega política base
@@ -99,10 +113,22 @@ def main() -> None:
     base_policy = EquipmentPolicy.from_file(args.policy)
 
     # Carrega dataset
-    print(f"Carregando dataset: {args.dataset}")
-    adapter = CsvDatasetAdapter()
-    dataset = adapter.load(args.dataset)
+    print(f"Carregando dataset: {args.dataset} (formato: {args.format})")
+    if args.format == "coco":
+        adapter = CocoDatasetAdapter()
+        dataset = adapter.load(args.dataset, split=args.split)
+        is_coco = True
+    else:
+        adapter = CsvDatasetAdapter()
+        dataset = adapter.load(args.dataset)
+        is_coco = False
     print(f"  {len(dataset)} frame(s) carregado(s)")
+
+    # Subamostra se necessário (para viabilidade em datasets grandes)
+    if len(dataset) > args.max_frames:
+        step = len(dataset) / args.max_frames
+        dataset = [dataset[int(i * step)] for i in range(args.max_frames)]
+        print(f"  Subamostrado para {len(dataset)} frame(s) para calibração")
 
     # Define grid de parâmetros
     if args.grid:
@@ -115,7 +141,7 @@ def main() -> None:
 
     # Executa calibração
     print(f"Iniciando calibração com {len(param_grid)} parâmetros...")
-    calibrator = RuleCalibrationModule(base_policy)
+    calibrator = RuleCalibrationModule(base_policy, is_coco=is_coco)
     result = calibrator.calibrate(dataset, param_grid, zones)
 
     # Salva resultados

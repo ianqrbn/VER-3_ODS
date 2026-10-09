@@ -68,12 +68,42 @@ class RelationInferenceModule:
 
         return PersonEvaluation(person=relation.person, equipment=tuple(evaluations))
 
-    def _zone_geometry(self, canonical: str) -> ZoneGeometry:
-        """Geometria da zona, considerando zonas customizadas da política."""
+    def _zone_geometry(self, canonical: str, person_bbox=None) -> ZoneGeometry:
+        """Geometria da zona, considerando zonas customizadas e aspect ratio.
+        
+        Se person_bbox é fornecido, ajusta as tolerâncias baseado na razão de
+        aspecto (largura/altura) da bbox da pessoa.
+        """
         rule = self.policy.rules[canonical]
+        base_geometry = rule.geometry
+        
+        # Usa zonas customizadas da política se disponíveis
         if rule.zone in self.policy.custom_zones:
-            return self.policy.custom_zones[rule.zone]
-        return rule.geometry
+            base_geometry = self.policy.custom_zones[rule.zone]
+        
+        # Se não temos bbox da pessoa, retorna a geometria base
+        if person_bbox is None:
+            return base_geometry
+        
+        # Calcula razão de aspecto
+        aspect_ratio = person_bbox.width / person_bbox.height if person_bbox.height > 0 else 1.0
+        
+        # Ajusta tolerâncias baseado no aspect ratio
+        if aspect_ratio >= 1.0:  # Pessoa deitada ou estendida
+            tol_u = base_geometry.tolerance_u * 1.3  # expande para laterais
+            tol_v = base_geometry.tolerance_v * 1.5  # expande para baixo
+        else:  # Pessoa em pé
+            tol_u = base_geometry.tolerance_u
+            tol_v = base_geometry.tolerance_v
+        
+        return ZoneGeometry(
+            u_min=base_geometry.u_min,
+            u_max=base_geometry.u_max,
+            v_min=base_geometry.v_min,
+            v_max=base_geometry.v_max,
+            tolerance_u=tol_u,
+            tolerance_v=tol_v,
+        )
 
     def _evaluate_detected(
         self,
@@ -83,7 +113,7 @@ class RelationInferenceModule:
         match: EquipmentMatch,
     ) -> EquipmentEvaluation:
         rule = self.policy.rules[canonical]
-        zone_geometry = self._zone_geometry(canonical)
+        zone_geometry = self._zone_geometry(canonical, person.bbox)
         u, v = normalized_position(match.track.bbox, person.bbox)
         placement = zone_score(u, v, zone_geometry)
         factor = self._state_factor(match.track)

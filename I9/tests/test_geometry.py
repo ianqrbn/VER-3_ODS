@@ -89,12 +89,18 @@ class ZoneScoreTest(unittest.TestCase):
     def test_borda_da_zona(self):
         self.assertAlmostEqual(zone_score(0.30, 0.72, self.zone), 0.70)
 
-    def test_fora_da_zona_decai_ate_a_tolerancia(self):
-        meia = zone_score(0.50, 0.72 - 0.09, self.zone)
-        limite = zone_score(0.50, 0.72 - 0.18, self.zone)
-        self.assertAlmostEqual(meia, 0.35)
-        self.assertAlmostEqual(limite, 0.0)
-        self.assertEqual(zone_score(0.50, 0.72 - 1.0, self.zone), 0.0)
+    def test_fora_da_zona_decai_gaussiano(self):
+        import math
+        # Com decaimento gaussiano: score = 0.70 * exp(-0.5 * (dist/tol)^2)
+        meia = zone_score(0.50, 0.72 - 0.09, self.zone)  # meia tolerancia
+        limite = zone_score(0.50, 0.72 - 0.18, self.zone)  # tolerancia completa
+        # meia tolerancia: 0.70 * exp(-0.5 * 0.25) = 0.70 * 0.8825 = 0.6177
+        self.assertAlmostEqual(meia, 0.70 * math.exp(-0.125), places=4)
+        # tolerancia completa: 0.70 * exp(-0.5 * 1.0) = 0.70 * 0.6065 = 0.4246
+        self.assertAlmostEqual(limite, 0.70 * math.exp(-0.5), places=4)
+        # longe da zona: score muito pequeno mas não zero
+        longe = zone_score(0.50, 0.72 - 1.0, self.zone)
+        self.assertLess(longe, 0.01)
 
     def test_decaimento_isotropico_nas_tolerancias(self):
         # 0.09 equivale a meia tolerância em u e em v -> mesma pontuação
