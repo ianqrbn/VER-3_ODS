@@ -1,0 +1,22 @@
+{
+  "message_type": "event",
+  "schema": "ods.alertas.alerta",
+  "schema_version": "1.0",
+  "producer": "S3",
+  "published_at": "2026-10-01T18:00:05Z",
+  "payload": {
+    "alerta_id": "alerta-001",
+    "evento_id": "evt-001",
+    "severidade": "ALTA",
+    "destinatarios": [
+      "operador-01"
+    ],
+    "canais": [
+      "TELA",
+      "SOM"
+    ],
+    "evidencia_ref": "evidencia-001",
+    "estado": "CRIADO",
+    "criado_em": "2026-10-01T18:00:00Z"
+  }
+}

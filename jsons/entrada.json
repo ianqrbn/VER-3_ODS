@@ -1,0 +1,17 @@
+{
+  "message_type": "event",
+  "schema": "ods.eventos.qualificados",
+  "schema_version": "1.0",
+  "producer": "S2",
+  "published_at": "2026-10-01T18:00:00Z",
+  "payload": {
+    "evento_id": "evt-001",
+    "tipo": "VIOLACAO_EPI",
+    "origem": "CAMERA-01",
+    "timestamp": "2026-10-01T17:59:50Z",
+    "confianca": 0.95,
+    "pessoa_id": "pessoa-001",
+    "zona_id": "zona-01",
+    "evidencia_ref": "evidencia-001"
+  }
+}
