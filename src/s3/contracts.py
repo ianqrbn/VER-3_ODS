@@ -32,6 +32,14 @@ class EventoQualificado:
         if not self.timestamp:
             raise ValueError("O evento precisa de um timestamp.")
 
+        if (
+            isinstance(self.confianca, bool)
+            or not isinstance(self.confianca, (int, float))
+        ):
+            raise ValueError(
+                "A confiança deve ser numérica."
+            )
+
         if not 0 <= self.confianca <= 1:
             raise ValueError(
                 "A confiança deve estar entre 0 e 1."

@@ -1,6 +1,7 @@
 
 import json
 import unittest
+from pathlib import Path
 
 from s3.ingestion import IngestorEventos
 from s3.repository import AlertRepository
@@ -9,6 +10,10 @@ from s3.routing import (
     RoteadorAlertas,
 )
 from s3.service import AlertService
+
+ARQUIVO_ENTRADA = (
+    Path(__file__).resolve().parents[2] / "jsons" / "entrada.json"
+)
 
 
 class TestIngestorEventos(unittest.TestCase):
@@ -142,6 +147,90 @@ class TestIngestorEventos(unittest.TestCase):
 
         self.assertEqual(len(historico), 1)
         self.assertEqual(historico[0].acao, "CRIADO")
+
+    def _envelope(self):
+        return {
+            "message_type": "event",
+            "schema": "ods.eventos.qualificados",
+            "schema_version": "1.0",
+            "producer": "S2",
+            "published_at": "2026-09-18T10:00:01Z",
+            "payload": self.dados,
+        }
+
+    def test_receber_envelope_documentado(self):
+        """Deve aceitar o evento dentro do envelope."""
+
+        alerta = self.ingestor.receber(
+            json.dumps(self._envelope())
+        )
+
+        self.assertEqual(alerta.evento_id, "evt-001")
+        self.assertEqual(alerta.evidencia_ref, "evidencia-001")
+
+    def test_receber_arquivo_entrada_json(self):
+        """O exemplo jsons/entrada.json deve ser aceito."""
+
+        with open(ARQUIVO_ENTRADA, encoding="utf-8") as arquivo:
+            mensagem = arquivo.read()
+
+        alerta = self.ingestor.receber(mensagem)
+
+        self.assertEqual(alerta.evento_id, "evt-001")
+        self.assertEqual(alerta.severidade, "ALTA")
+
+    def test_envelope_com_payload_nao_objeto(self):
+        """O payload precisa ser um objeto JSON."""
+
+        envelope = self._envelope()
+        envelope["payload"] = ["evento"]
+
+        with self.assertRaises(ValueError):
+            self.ingestor.receber(json.dumps(envelope))
+
+    def test_envelope_com_tipo_invalido(self):
+        """Deve rejeitar message_type diferente de event."""
+
+        envelope = self._envelope()
+        envelope["message_type"] = "command"
+
+        with self.assertRaises(ValueError):
+            self.ingestor.receber(json.dumps(envelope))
+
+    def test_envelope_com_schema_invalido(self):
+        """Deve rejeitar schema diferente do esperado."""
+
+        envelope = self._envelope()
+        envelope["schema"] = "ods.alertas.alerta"
+
+        with self.assertRaises(ValueError):
+            self.ingestor.receber(json.dumps(envelope))
+
+    def test_envelope_sem_producer(self):
+        """O envelope precisa identificar o produtor."""
+
+        envelope = self._envelope()
+        del envelope["producer"]
+
+        with self.assertRaises(ValueError):
+            self.ingestor.receber(json.dumps(envelope))
+
+    def test_envelope_com_payload_incompleto(self):
+        """Campos obrigatórios do payload continuam exigidos."""
+
+        envelope = self._envelope()
+        del envelope["payload"]["tipo"]
+
+        with self.assertRaises(ValueError):
+            self.ingestor.receber(json.dumps(envelope))
+
+    def test_confianca_nao_numerica(self):
+        """Confiança em texto deve gerar ValueError."""
+
+        self.dados["confianca"] = "0.9"
+
+        with self.assertRaises(ValueError):
+            self.ingestor.receber(json.dumps(self.dados))
 
 
 if __name__ == "__main__":

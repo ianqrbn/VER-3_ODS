@@ -11,6 +11,13 @@ from s3.routing import RoteadorAlertas
 "criação/orquestração"
 "cria o alerta"
 
+# Estado de destino → estados de origem permitidos.
+TRANSICOES = {
+    "RECONHECIDO": {"CRIADO"},
+    "SILENCIADO": {"CRIADO", "RECONHECIDO"},
+    "ENCERRADO": {"CRIADO", "RECONHECIDO", "SILENCIADO"},
+}
+
 class AlertService:
     
     """Serviço responsável pela criaçãoe pelo processamento de alertas."""
@@ -128,30 +135,7 @@ class AlertService:
         Registra que um responsável confirmou ter visto o alerta.
         """
 
-        alerta = self.repository.buscar_por_id(alerta_id)
-
-        if alerta is None:
-            raise ValueError(
-                "Alerta não encontrado."
-            )
-
-        if alerta.estado == "SILENCIADO":
-            raise ValueError(
-                "Um alerta silenciado não pode ser reconhecido."
-            )
-
-        registro = RegistroHistorico(
-            alerta_id=alerta.alerta_id,
-            evento_id=alerta.evento_id,
-            acao="RECONHECIDO",
-            autor_id=autor_id,
-        )
-
-        self.repository.registrar_historico(registro)
-
-        alerta.estado = "RECONHECIDO"
-
-        return alerta
+        return self._mudar_estado(alerta_id, autor_id, "RECONHECIDO")
 
     def silenciar_alerta(
         self,
@@ -162,6 +146,32 @@ class AlertService:
         Silencia o alerta, registrando o responsável pela ação.
         """
 
+        return self._mudar_estado(alerta_id, autor_id, "SILENCIADO")
+
+    def encerrar_alerta(
+        self,
+        alerta_id: str,
+        autor_id: str,
+    ) -> Alerta:
+        """
+        Encerra o alerta. ENCERRADO é um estado final.
+        """
+
+        return self._mudar_estado(alerta_id, autor_id, "ENCERRADO")
+
+    def _mudar_estado(
+        self,
+        alerta_id: str,
+        autor_id: str,
+        novo_estado: str,
+    ) -> Alerta:
+        """
+        Aplica uma transição permitida e registra no histórico.
+
+        Comandos repetidos ou fora de ordem são rejeitados,
+        para não duplicar registros no histórico.
+        """
+
         alerta = self.repository.buscar_por_id(alerta_id)
 
         if alerta is None:
@@ -169,20 +179,22 @@ class AlertService:
                 "Alerta não encontrado."
             )
 
-        if alerta.estado == "SILENCIADO":
+        if alerta.estado not in TRANSICOES[novo_estado]:
             raise ValueError(
-                "O alerta já está silenciado."
+                f"Transição inválida: {alerta.estado} → {novo_estado}."
             )
 
+        # Registra antes de mudar o estado: se o histórico
+        # falhar, o alerta permanece inalterado.
         registro = RegistroHistorico(
             alerta_id=alerta.alerta_id,
             evento_id=alerta.evento_id,
-            acao="SILENCIADO",
+            acao=novo_estado,
             autor_id=autor_id,
         )
 
         self.repository.registrar_historico(registro)
 
-        alerta.estado = "SILENCIADO"
+        alerta.estado = novo_estado
 
         return alerta

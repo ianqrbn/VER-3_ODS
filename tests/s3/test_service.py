@@ -124,7 +124,7 @@ class TestAlertService(unittest.TestCase):
     
             self.assertIsNone(alerta_salvo)
     
-    def test_reconhecer_alerta(self):
+    def test_reconhecer_alerta_basico(self):
         evento = EventoQualificado(
         evento_id="evt-001",
         tipo="VIOLACAO_EPI",
@@ -338,6 +338,146 @@ class TestAlertService(unittest.TestCase):
         )
 
         self.assertEqual(alerta_atualizado.estado, "SILENCIADO")
+
+
+class TestCicloDeVida(unittest.TestCase):
+    """Transições de estado e comandos repetidos."""
+
+    def setUp(self):
+        self.service = AlertService()
+
+        evento = EventoQualificado(
+            evento_id="evt-ciclo",
+            tipo="VIOLACAO_EPI",
+            origem="S2",
+            timestamp="2026-09-18T10:00:00Z",
+            confianca=0.96,
+        )
+
+        self.alerta = self.service.processar_evento(
+            evento=evento,
+            severidade="ALTA",
+            destinatarios=["supervisor-01"],
+            canais=["SOM"],
+        )
+
+        self.alerta_id = self.alerta.alerta_id
+
+    def _acoes(self):
+        return [
+            registro.acao
+            for registro in self.service.repository.buscar_historico(
+                self.alerta_id
+            )
+        ]
+
+    def test_reconhecer_duas_vezes(self):
+        """ACK repetido é rejeitado e não duplica o histórico."""
+
+        self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+
+        with self.assertRaises(ValueError):
+            self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+
+        self.assertEqual(self._acoes(), ["CRIADO", "RECONHECIDO"])
+        self.assertEqual(self.alerta.estado, "RECONHECIDO")
+
+    def test_silenciar_duas_vezes_nao_duplica_historico(self):
+        """MUTE repetido é rejeitado e não duplica o histórico."""
+
+        self.service.silenciar_alerta(self.alerta_id, "sup-01")
+
+        with self.assertRaises(ValueError):
+            self.service.silenciar_alerta(self.alerta_id, "sup-01")
+
+        self.assertEqual(self._acoes(), ["CRIADO", "SILENCIADO"])
+
+    def test_ciclo_completo(self):
+        """CRIADO → RECONHECIDO → SILENCIADO → ENCERRADO."""
+
+        self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+        self.service.silenciar_alerta(self.alerta_id, "sup-01")
+        alerta = self.service.encerrar_alerta(self.alerta_id, "sup-02")
+
+        self.assertEqual(alerta.estado, "ENCERRADO")
+        self.assertEqual(
+            self._acoes(),
+            ["CRIADO", "RECONHECIDO", "SILENCIADO", "ENCERRADO"],
+        )
+
+        ultimo = self.service.repository.buscar_historico(
+            self.alerta_id
+        )[-1]
+
+        self.assertEqual(ultimo.autor_id, "sup-02")
+        self.assertIsNotNone(ultimo.registrado_em.tzinfo)
+
+    def test_encerrar_direto(self):
+        """Um alerta recém-criado pode ser encerrado."""
+
+        alerta = self.service.encerrar_alerta(self.alerta_id, "sup-01")
+
+        self.assertEqual(alerta.estado, "ENCERRADO")
+
+    def test_encerrar_duas_vezes(self):
+        """Encerramento repetido é rejeitado."""
+
+        self.service.encerrar_alerta(self.alerta_id, "sup-01")
+
+        with self.assertRaises(ValueError):
+            self.service.encerrar_alerta(self.alerta_id, "sup-01")
+
+        self.assertEqual(self._acoes(), ["CRIADO", "ENCERRADO"])
+
+    def test_encerrado_e_estado_final(self):
+        """Nenhum comando é aceito após o encerramento."""
+
+        self.service.encerrar_alerta(self.alerta_id, "sup-01")
+
+        with self.assertRaises(ValueError):
+            self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+
+        with self.assertRaises(ValueError):
+            self.service.silenciar_alerta(self.alerta_id, "sup-01")
+
+        self.assertEqual(self.alerta.estado, "ENCERRADO")
+
+    def test_encerrar_inexistente(self):
+        with self.assertRaises(ValueError):
+            self.service.encerrar_alerta("alerta-x", "sup-01")
+
+    def test_comando_sem_autor_nao_muda_estado(self):
+        """Sem autor, o comando falha e o estado é mantido."""
+
+        with self.assertRaises(ValueError):
+            self.service.encerrar_alerta(self.alerta_id, "")
+
+        self.assertEqual(self.alerta.estado, "CRIADO")
+        self.assertEqual(self._acoes(), ["CRIADO"])
+
+    def test_evento_repetido_apos_mudanca_de_estado(self):
+        """Reenvio do evento não recria nem reseta o alerta."""
+
+        self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+
+        evento = EventoQualificado(
+            evento_id="evt-ciclo",
+            tipo="VIOLACAO_EPI",
+            origem="S2",
+            timestamp="2026-09-18T10:00:00Z",
+            confianca=0.96,
+        )
+
+        alerta = self.service.processar_evento(
+            evento=evento,
+            severidade="ALTA",
+            destinatarios=["supervisor-01"],
+            canais=["SOM"],
+        )
+
+        self.assertEqual(alerta.alerta_id, self.alerta_id)
+        self.assertEqual(alerta.estado, "RECONHECIDO")
+        self.assertEqual(self._acoes(), ["CRIADO", "RECONHECIDO"])
 
 
 if __name__ == "__main__":
