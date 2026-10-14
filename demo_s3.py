@@ -1,25 +1,34 @@
 """
-Demonstração ao vivo do componente S3 (Alertas e Notificações).
+Demonstração do componente S3 (Alertas e Notificações)
+com os contratos da Especificação de interfaces 1.0.
 
-Simula o S2 publicando um evento qualificado através de um assinante
-falso (substituto do broker real do B2, que ainda não existe), e mostra
-o alerta passando pelo roteamento, criação, reconhecimento, silenciamento
-e encerramento, com cada mudança publicada por um publicador falso.
+Usa um assinante e um publicador falsos no lugar do Kafka:
+não acessa o broker real.
 
 Para rodar:
     PowerShell:  $env:PYTHONPATH = "src"; python demo_s3.py
     Git Bash:    PYTHONPATH=src python demo_s3.py
 """
 
+import json
+import logging
+import sys
+from datetime import timedelta
+from pathlib import Path
+from uuid import uuid4
+
+from s3.commands import ProcessadorComandos
+from s3.envelope import agora, formatar_horario
 from s3.ingestion import IngestorEventos
-from s3.repository import AlertRepository
-from s3.routing import ConfiguracaoRoteamento, RoteadorAlertas
+from s3.routing import RoteadorAlertas
 from s3.service import AlertService
-from s3.subscription import ConectorEventos
+from s3.subscription import ConectorComandos, ConectorEventos, DespachanteS3
+
+PASTA_JSONS = Path(__file__).resolve().parent / "jsons"
 
 
 class AssinanteDemo:
-    """Substituto simples do assinante real do B2, só para esta demonstração."""
+    """Substituto do assinante Kafka, só para esta demonstração."""
 
     def __init__(self):
         self.callback = None
@@ -32,10 +41,16 @@ class AssinanteDemo:
 
 
 class PublicadorDemo:
-    """Substituto do publicador real do B2: só imprime o que sairia."""
+    """Substituto do publicador Kafka: imprime o que sairia."""
 
     def publicar(self, mensagem):
-        print(f"   [saída → aplicações] {mensagem}")
+        dados = json.loads(mensagem)
+        print(f"   [saída: {dados['schema']}]")
+        print("   " + json.dumps(dados["payload"], ensure_ascii=False))
+
+
+def ler(nome):
+    return json.loads((PASTA_JSONS / nome).read_text(encoding="utf-8"))
 
 
 def titulo(texto):
@@ -45,94 +60,99 @@ def titulo(texto):
     print("=" * 60)
 
 
-def passo(texto):
-    print(f"\n>> {texto}")
+def acao(alerta_id, action, **campos):
+    payload = {"alert_id": alerta_id, "action": action, "actor": "user:maria"}
+    payload.update(campos)
+    return {
+        "message_type": "command",
+        "message_id": str(uuid4()),
+        "schema": "ods.s3.alert_action.command",
+        "schema_version": "1.0",
+        "producer": "A5",
+        "published_at": "2026-09-23T14:30:41.000Z",
+        "target": "S3",
+        "payload": payload,
+    }
 
 
 def main():
-    titulo("1. Montagem do S3")
+    # Acentos no console do Windows; log na mesma saída, em ordem.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
 
-    repo = AlertRepository()
-
-    roteador = RoteadorAlertas({
-        "VIOLACAO_EPI": ConfiguracaoRoteamento(
-            severidade="ALTA",
-            destinatarios=("supervisor-01",),
-            canais=("SOM", "TELA"),
-        )
-    })
-
-    service = AlertService(
-        repository=repo,
-        roteador=roteador,
-        publicador=PublicadorDemo(),
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="   [log] %(message)s",
+        stream=sys.stdout,
     )
-    ingestor = IngestorEventos(service)
-    print("AlertRepository, RoteadorAlertas, AlertService e IngestorEventos prontos.")
 
-    titulo("2. Ligação com o barramento")
+    titulo("1. Montagem do S3 com o artefato ROUTING de A5")
+
+    roteador = RoteadorAlertas.de_artefato(ler("routing_a5.json"), "routing-a5-1")
+    publicador = PublicadorDemo()
+    service = AlertService(roteador=roteador, publicador=publicador)
 
     assinante = AssinanteDemo()
-    ConectorEventos(assinante, ingestor).conectar()
-    print("ConectorEventos conectado a um assinante de demonstração.")
+    DespachanteS3(
+        ConectorEventos(assinante, IngestorEventos(service)),
+        ConectorComandos(assinante, ProcessadorComandos(service), publicador),
+    ).conectar(assinante)
 
-    titulo("3. S2 publica um evento qualificado (simulação de entrada)")
+    print("Rota: PPE_NON_COMPLIANT → HIGH, role:supervisor, SCREEN + PUSH")
 
-    mensagem = (
-        '{"evento_id": "evt-demo-001", "tipo": "VIOLACAO_EPI", '
-        '"origem": "S2", "timestamp": "2026-10-08T10:00:00Z", '
-        '"confianca": 0.93, "pessoa_id": "pessoa-12", '
-        '"zona_id": "producao", "evidencia_ref": "evidencia-demo-001"}'
-    )
-    print(f"Mensagem recebida:\n{mensagem}")
+    titulo("2. S2 publica ods.s2.event (jsons/entrada.json)")
 
-    alerta = assinante.publicar(mensagem)
+    entrada = (PASTA_JSONS / "entrada.json").read_text(encoding="utf-8")
+    alerta = assinante.publicar(entrada)
+    alerta_id = alerta.alerta_id
 
-    passo("Alerta criado:")
-    print(f"   evento_id     = {alerta.evento_id}")
-    print(f"   severidade    = {alerta.severidade}")
-    print(f"   destinatarios = {alerta.destinatarios}")
-    print(f"   canais        = {alerta.canais}")
-    print(f"   estado        = {alerta.estado}")
+    titulo("3. A mesma mensagem chega de novo (entrega repetida)")
 
-    titulo("4. Supervisor reconhece o alerta")
+    print(f"Resultado: {assinante.publicar(entrada)} (descartada pelo message_id)")
 
-    alerta = service.reconhecer_alerta(alerta.alerta_id, autor_id="supervisor-01")
-    print(f"Novo estado: {alerta.estado}")
+    titulo("4. Supervisora reconhece o alerta (alert_action ACKNOWLEDGE)")
 
-    titulo("5. Supervisor silencia o alerta")
+    comando = acao(alerta_id, "ACKNOWLEDGE")
+    assinante.publicar(json.dumps(comando))
 
-    alerta = service.silenciar_alerta(alerta.alerta_id, autor_id="supervisor-01")
-    print(f"Novo estado: {alerta.estado}")
+    titulo("5. O mesmo comando é reenviado: mesma reply, sem efeito novo")
 
-    titulo("6. Histórico de auditoria do alerta")
+    assinante.publicar(json.dumps(comando))
 
-    for registro in repo.buscar_historico(alerta.alerta_id):
-        print(f"   {registro.acao:<12} autor={registro.autor_id!s:<15} em={registro.registrado_em}")
+    titulo("6. Silencia por 30 minutos (MUTE) e depois encerra (CLOSE)")
 
-    titulo("7. Validação rejeitando um evento inválido")
+    assinante.publicar(json.dumps(
+        acao(alerta_id, "MUTE",
+             mute_until=formatar_horario(agora() + timedelta(minutes=30)),
+             reason="troca de turno")
+    ))
+    assinante.publicar(json.dumps(acao(alerta_id, "CLOSE")))
 
-    mensagem_invalida = (
-        '{"evento_id": "evt-demo-002", "tipo": "VIOLACAO_EPI", '
-        '"origem": "S2", "timestamp": "2026-10-08T10:05:00Z", '
-        '"confianca": 1.5, "pessoa_id": "pessoa-12", '
-        '"zona_id": "producao", "evidencia_ref": "evidencia-demo-002"}'
-    )
-    try:
-        assinante.publicar(mensagem_invalida)
-    except ValueError as erro:
-        print(f"Rejeitado corretamente: {erro}")
+    titulo("7. Comando inválido: reconhecer um alerta encerrado")
 
-    titulo("8. Idempotência: o mesmo evento não cria dois alertas")
+    assinante.publicar(json.dumps(acao(alerta_id, "ACKNOWLEDGE")))
 
-    primeiro = assinante.publicar(mensagem)
-    segundo = assinante.publicar(mensagem)
-    print(f"Mesmo alerta_id? {primeiro.alerta_id == segundo.alerta_id}")
+    titulo("8. Histórico de auditoria do alerta")
 
-    titulo("9. Supervisor encerra o alerta")
+    for registro in service.repository.buscar_historico(alerta_id):
+        print(
+            f"   {registro.acao:<13} autor={registro.autor_id!s:<11} "
+            f"motivo={registro.motivo!s:<15} em={registro.registrado_em}"
+        )
 
-    alerta = service.encerrar_alerta(alerta.alerta_id, autor_id="supervisor-01")
-    print(f"Novo estado: {alerta.estado}")
+    titulo("9. A2 cria um alerta de negócio (ods.s3.alert.command)")
+
+    assinante.publicar(json.dumps(ler("comando_criar.json")))
+
+    titulo("10. Consulta de histórico (ods.s3.alerts.query)")
+
+    consulta = ler("consulta_alertas.json")
+    consulta["payload"] = {"state": "CLOSED"}
+    assinante.publicar(json.dumps(consulta))
+
+    titulo("11. Mensagem inválida é descartada e registrada em log")
+
+    assinante.publicar('{"schema": "ods.s2.event"}')
 
     titulo("Fim da demonstração")
 

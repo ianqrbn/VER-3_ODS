@@ -1,79 +1,97 @@
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 from s3.alert import Alerta
+from s3.envelope import formatar_horario, montar_envelope
 
 "serialização da saída"
-'Transforma o alerta no envelope de jsons/saida.json (não publica)'
+'Transforma o alerta em ods.s3.alert (Especificação 1.0, seção 7); não publica'
 
-SCHEMA_SAIDA = "ods.alertas.alerta"
-VERSAO_SCHEMA_SAIDA = "1.0"
-PRODUTOR = "S3"
+SCHEMA_ALERTA = "ods.s3.alert"
 
 
-def formatar_horario(horario: datetime) -> str:
+def payload_alerta(alerta: Alerta) -> dict:
     """
-    Converte um horário com fuso para ISO 8601 em UTC,
-    no formato dos exemplos: 2026-10-01T18:00:00Z.
-    """
-
-    if horario.tzinfo is None or horario.utcoffset() is None:
-        raise ValueError(
-            "O horário precisa conter fuso horário."
-        )
-
-    return (
-        horario.astimezone(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
-
-
-def serializar_alerta(
-    alerta: Alerta,
-    publicado_em: datetime | None = None,
-) -> dict:
-    """
-    Monta o envelope de saída de um alerta.
-
-    Envelope provisório conforme jsons/saida.json;
-    o schema oficial ainda depende do B1.
+    Payload de ods.s3.alert. Campos opcionais sem
+    valor são omitidos. Também é o item da reply
+    de ods.s3.alerts.query.
     """
 
     alerta.validar()
 
-    if publicado_em is None:
-        publicado_em = datetime.now(timezone.utc)
+    payload = {"alert_id": alerta.alerta_id}
 
-    return {
-        "message_type": "event",
-        "schema": SCHEMA_SAIDA,
-        "schema_version": VERSAO_SCHEMA_SAIDA,
-        "producer": PRODUTOR,
-        "published_at": formatar_horario(publicado_em),
-        "payload": {
-            "alerta_id": alerta.alerta_id,
-            "evento_id": alerta.evento_id,
-            "severidade": alerta.severidade,
-            "destinatarios": list(alerta.destinatarios),
-            "canais": list(alerta.canais),
-            "evidencia_ref": alerta.evidencia_ref,
-            "estado": alerta.estado,
-            "criado_em": formatar_horario(alerta.criado_em),
-        },
-    }
+    if alerta.evento_id is not None:
+        payload["event_id"] = alerta.evento_id
+
+    payload.update({
+        "title": alerta.titulo,
+        "message": alerta.mensagem,
+        "severity": alerta.severidade,
+        "recipients": list(alerta.destinatarios),
+        "channels": list(alerta.canais),
+    })
+
+    if alerta.clip_id is not None:
+        payload["clip_id"] = alerta.clip_id
+
+    payload["state"] = alerta.estado
+    payload["created_at"] = formatar_horario(alerta.criado_em)
+
+    for campo, valor in (
+        ("acknowledged_by", alerta.reconhecido_por),
+        ("acknowledged_at", alerta.reconhecido_em),
+        ("muted_until", alerta.silenciado_ate),
+        ("closed_by", alerta.encerrado_por),
+        ("closed_at", alerta.encerrado_em),
+    ):
+        if valor is None:
+            continue
+
+        payload[campo] = (
+            formatar_horario(valor)
+            if isinstance(valor, datetime)
+            else valor
+        )
+
+    return payload
 
 
-def alerta_para_json(
+def serializar_alerta(
     alerta: Alerta,
+    sequence: int = 0,
     publicado_em: datetime | None = None,
-) -> str:
+    message_id: str | None = None,
+) -> dict:
     """
-    Serializa o envelope de saída como texto JSON.
+    Monta a mensagem ods.s3.alert (perfil EV-SERVIÇO).
+
+    captured_at: o do evento de origem; em alerta criado
+    por comando, o horário de criação.
+    """
+
+    return montar_envelope(
+        "event",
+        SCHEMA_ALERTA,
+        payload_alerta(alerta),
+        publicado_em=publicado_em,
+        message_id=message_id,
+        correlation_id=alerta.correlacao_id,
+        captured_at=alerta.capturado_em or alerta.criado_em,
+        source_id=alerta.origem,
+        session_id=alerta.session_id,
+        sequence=sequence,
+        artifact_version=alerta.versao_roteamento,
+    )
+
+
+def alerta_para_json(alerta: Alerta, **opcoes: object) -> str:
+    """
+    Serializa ods.s3.alert como texto JSON.
     """
 
     return json.dumps(
-        serializar_alerta(alerta, publicado_em),
+        serializar_alerta(alerta, **opcoes),
         ensure_ascii=False,
     )

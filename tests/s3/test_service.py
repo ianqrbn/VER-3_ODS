@@ -1,369 +1,129 @@
-
 import unittest
+from datetime import datetime, timezone
 
-from s3.contracts import EventoQualificado
+from s3.errors import ALERT_NOT_FOUND, INVALID_TRANSITION, ErroS3
 from s3.service import AlertService
 
+from fabricas import FUTURO, evento, rota, roteador
 
-class TestAlertService(unittest.TestCase):
+
+class TestProcessarEvento(unittest.TestCase):
 
     def setUp(self):
-        """Prepara os dados utilizados em cada teste."""
+        self.service = AlertService(roteador=roteador())
 
+    def test_alerta_do_evento(self):
+        """A rota define severidade, destinatários, canais e textos."""
+
+        alerta = self.service.processar_evento_roteado(evento())
+
+        self.assertEqual(alerta.evento_id, "evt-001")
+        self.assertEqual(alerta.severidade, "HIGH")
+        self.assertEqual(alerta.destinatarios, ["role:supervisor"])
+        self.assertEqual(alerta.canais, ["SCREEN", "PUSH"])
+        self.assertEqual(alerta.titulo, "EPI ausente: luva")
+        self.assertEqual(
+            alerta.mensagem, "Pessoa sem luva em galpao-solda há 8 s"
+        )
+        self.assertEqual(alerta.estado, "CREATED")
+
+    def test_contexto_do_envelope(self):
+        """O alerta guarda o contexto usado no envelope de saída."""
+
+        alerta = self.service.processar_evento_roteado(evento())
+
+        self.assertEqual(alerta.origem, "cam0")
+        self.assertEqual(alerta.session_id, "sessao-1")
+        self.assertEqual(alerta.correlacao_id, "evt-001")
+        self.assertEqual(alerta.versao_roteamento, "routing-a5-1")
+        self.assertEqual(
+            alerta.capturado_em,
+            datetime(2026, 9, 23, 14, 29, 59, 870000, tzinfo=timezone.utc),
+        )
+
+    def test_evento_sem_rota(self):
+        self.assertIsNone(
+            self.service.processar_evento_roteado(evento(tipo="ZONE_ENTER"))
+        )
+
+    def test_servico_sem_roteador(self):
+        with self.assertRaises(ValueError):
+            AlertService().processar_evento_roteado(evento())
+
+    def test_evento_invalido(self):
+        with self.assertRaises(ValueError):
+            self.service.processar_evento_roteado(evento(confianca=1.5))
+
+        self.assertIsNone(self.service.repository.buscar_por_evento("evt-001"))
+
+    def test_mesmo_evento_outras_fases(self):
+        """UPDATED e ENDED do mesmo event_id não criam outro alerta."""
+
+        primeiro = self.service.processar_evento_roteado(evento())
+
+        for fase in ("UPDATED", "ENDED"):
+            alerta = self.service.processar_evento_roteado(
+                evento(fase=fase, duracao_ms=20000)
+            )
+            self.assertEqual(alerta.alerta_id, primeiro.alerta_id)
+
+        historico = self.service.repository.buscar_historico(primeiro.alerta_id)
+        self.assertEqual(len(historico), 1)
+
+    def test_ids_diferentes(self):
+        primeiro = self.service.processar_evento(evento(), rota())
+        segundo = self.service.processar_evento(evento(evento_id="evt-002"), rota())
+
+        self.assertNotEqual(primeiro.alerta_id, segundo.alerta_id)
+
+
+class TestCriarAlertaPorComando(unittest.TestCase):
+
+    def setUp(self):
         self.service = AlertService()
 
-        self.evento = EventoQualificado(
-            evento_id="evt-001",
-            tipo="VIOLACAO_EPI",
-            origem="S2",
-            timestamp="2026-09-18T10:00:00Z",
-            confianca=0.96,
-            pessoa_id="pessoa-37",
-            zona_id="producao",
-            evidencia_ref="evidencia-001"
+    def criar(self, **alteracoes):
+        dados = dict(
+            titulo="Acesso negado",
+            mensagem="Crachá recusado",
+            severidade="MEDIUM",
+            destinatarios=["group:portaria"],
+            canais=["SCREEN"],
         )
+        dados.update(alteracoes)
+        return self.service.criar_alerta(**dados)
 
-    def test_criar_alerta_valido(self):
-        """Deve criar um alerta a partir de um evento válido."""
+    def test_criar_sem_evento(self):
+        alerta = self.criar(correlacao_id="m-1")
 
-        alerta = self.service.criar_alerta(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM", "TELA"]
-        )
+        self.assertIsNone(alerta.evento_id)
+        self.assertEqual(alerta.estado, "CREATED")
+        self.assertEqual(alerta.correlacao_id, "m-1")
 
-        self.assertTrue(alerta.alerta_id)
+    def test_criar_citando_evento_ja_alertado(self):
+        """Alerta de negócio pode citar um evento que já tem alerta."""
 
-        self.assertEqual(
-            alerta.evento_id,
-            self.evento.evento_id
-        )
+        service = AlertService(roteador=roteador())
+        service.processar_evento_roteado(evento())
+        self.service = service
 
-        self.assertEqual(alerta.severidade, "ALTA")
+        alerta = self.criar(evento_id="evt-001")
 
-        self.assertEqual(
-            alerta.destinatarios,
-            ["supervisor-01"]
-        )
+        self.assertEqual(alerta.evento_id, "evt-001")
 
-        self.assertEqual(
-            alerta.canais,
-            ["SOM", "TELA"]
-        )
-
-        self.assertEqual(
-            alerta.evidencia_ref,
-            "evidencia-001"
-        )
-
-        self.assertEqual(alerta.estado, "CRIADO")
-
-    def test_rejeitar_evento_invalido(self):
-        """Não deve criar alerta com evento inválido."""
-
-        self.evento.confianca = 1.5
-
-        with self.assertRaises(ValueError):
-            self.service.criar_alerta(
-                evento=self.evento,
-                severidade="ALTA",
-                destinatarios=["supervisor-01"],
-                canais=["SOM"]
-            )
-
-    def test_rejeitar_alerta_sem_destinatarios(self):
-        """Não deve aceitar configuração sem destinatários."""
-
-        with self.assertRaises(ValueError):
-            self.service.criar_alerta(
-                evento=self.evento,
-                severidade="ALTA",
-                destinatarios=[],
-                canais=["SOM"]
-            )
-
-    def test_gerar_identificadores_diferentes(self):
-        """Deve gerar IDs distintos para duas criações."""
-
-        alerta1 = self.service.criar_alerta(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        alerta2 = self.service.criar_alerta(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        self.assertNotEqual(
-            alerta1.alerta_id,
-            alerta2.alerta_id
-        )
-    
-    def test_processar_evento_invalido(self):
-            """Evento inválido não deve ser armazenado."""
-    
-            self.evento.confianca = 1.5
-    
-            with self.assertRaises(ValueError):
-                self.service.processar_evento(
-                    evento=self.evento,
-                    severidade="ALTA",
-                    destinatarios=["supervisor-01"],
-                    canais=["SOM"]
-                )
-    
-            alerta_salvo = self.service.repository.buscar_por_evento(
-                self.evento.evento_id
-            )
-    
-            self.assertIsNone(alerta_salvo)
-    
-    def test_reconhecer_alerta_basico(self):
-        evento = EventoQualificado(
-        evento_id="evt-001",
-        tipo="VIOLACAO_EPI",
-        origem="CAMERA",
-        timestamp="2026-09-11T10:00:00Z",
-        confianca=0.95,
-    )
-
-        alerta = self.service.processar_evento(
-        evento=evento,
-        severidade="ALTA",
-        destinatarios=["operador-01"],
-        canais=["TELA"],
-    )
-
-        resultado = self.service.reconhecer_alerta(
-        alerta_id=alerta.alerta_id,
-        autor_id="operador-01",
-    )
-
-        self.assertEqual(resultado.estado, "RECONHECIDO")
-        
-    def test_reconhecer_alerta_registra_historico(self):
-        evento = EventoQualificado(
-        evento_id="evt-002",
-        tipo="VIOLACAO_EPI",
-        origem="CAMERA",
-        timestamp="2026-09-11T10:00:00Z",
-        confianca=0.95,
-    )
-
-        alerta = self.service.processar_evento(
-        evento=evento,
-        severidade="ALTA",
-        destinatarios=["operador-01"],
-        canais=["TELA"],
-    )
-
-        self.service.reconhecer_alerta(
-        alerta_id=alerta.alerta_id,
-        autor_id="operador-01",
-    )
-
-        historico = self.service.repository.buscar_historico(
-        alerta.alerta_id
-    )
-
-        self.assertEqual(len(historico), 2)
-        self.assertEqual(historico[1].acao, "RECONHECIDO")
-        self.assertEqual(historico[1].autor_id, "operador-01")
-    
-    def test_processar_evento_salva_alerta(self):
-            """O processamento deve armazenar o alerta."""
-    
-            alerta = self.service.processar_evento(
-                evento=self.evento,
-                severidade="ALTA",
-                destinatarios=["supervisor-01"],
-                canais=["SOM", "TELA"]
-            )
-    
-            alerta_salvo = self.service.repository.buscar_por_evento(
-                self.evento.evento_id
-            )
-    
-            self.assertIsNotNone(alerta_salvo)
-    
-            self.assertEqual(
-                alerta.alerta_id,
-                alerta_salvo.alerta_id
-            )
-    
-    def test_processar_evento_duplicado(self):
-            """O mesmo evento não deve criar dois alertas."""
-    
-            alerta1 = self.service.processar_evento(
-                evento=self.evento,
-                severidade="ALTA",
-                destinatarios=["supervisor-01"],
-                canais=["SOM"]
-            )
-    
-            alerta2 = self.service.processar_evento(
-                evento=self.evento,
-                severidade="ALTA",
-                destinatarios=["supervisor-01"],
-                canais=["SOM"]
-            )
-    
-            self.assertEqual(
-                alerta1.alerta_id,
-                alerta2.alerta_id
-            )
-    
-            self.assertIs(alerta1, alerta2)
-
-    def test_reconhecer_alerta(self):
-        """Deve marcar o alerta como reconhecido e registrar o autor."""
-
-        alerta = self.service.processar_evento(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        alerta_atualizado = self.service.reconhecer_alerta(
-            alerta_id=alerta.alerta_id,
-            autor_id="supervisor-01"
-        )
-
-        self.assertEqual(alerta_atualizado.estado, "RECONHECIDO")
-
-        historico = self.service.repository.buscar_historico(
-            alerta.alerta_id
-        )
-
-        self.assertEqual(len(historico), 2)
-        self.assertEqual(historico[1].acao, "RECONHECIDO")
-        self.assertEqual(historico[1].autor_id, "supervisor-01")
-
-    def test_reconhecer_alerta_inexistente(self):
-        """Não deve reconhecer um alerta que não existe."""
-
-        with self.assertRaises(ValueError):
-            self.service.reconhecer_alerta(
-                alerta_id="alerta-inexistente",
-                autor_id="supervisor-01"
-            )
-
-    def test_reconhecer_alerta_silenciado(self):
-        """Um alerta já silenciado não pode ser reconhecido."""
-
-        alerta = self.service.processar_evento(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        self.service.silenciar_alerta(
-            alerta_id=alerta.alerta_id,
-            autor_id="supervisor-01"
-        )
-
-        with self.assertRaises(ValueError):
-            self.service.reconhecer_alerta(
-                alerta_id=alerta.alerta_id,
-                autor_id="supervisor-01"
-            )
-
-    def test_silenciar_alerta(self):
-        """Deve marcar o alerta como silenciado e registrar o autor."""
-
-        alerta = self.service.processar_evento(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        alerta_atualizado = self.service.silenciar_alerta(
-            alerta_id=alerta.alerta_id,
-            autor_id="supervisor-02"
-        )
-
-        self.assertEqual(alerta_atualizado.estado, "SILENCIADO")
-
-        historico = self.service.repository.buscar_historico(
-            alerta.alerta_id
-        )
-
-        self.assertEqual(len(historico), 2)
-        self.assertEqual(historico[1].acao, "SILENCIADO")
-        self.assertEqual(historico[1].autor_id, "supervisor-02")
-
-    def test_silenciar_alerta_duas_vezes(self):
-        """Um alerta já silenciado não pode ser silenciado de novo."""
-
-        alerta = self.service.processar_evento(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        self.service.silenciar_alerta(
-            alerta_id=alerta.alerta_id,
-            autor_id="supervisor-01"
-        )
-
-        with self.assertRaises(ValueError):
-            self.service.silenciar_alerta(
-                alerta_id=alerta.alerta_id,
-                autor_id="supervisor-01"
-            )
-
-    def test_silenciar_alerta_sem_reconhecimento_previo(self):
-        """Deve ser possível silenciar direto, sem reconhecer antes."""
-
-        alerta = self.service.processar_evento(
-            evento=self.evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"]
-        )
-
-        alerta_atualizado = self.service.silenciar_alerta(
-            alerta_id=alerta.alerta_id,
-            autor_id="supervisor-01"
-        )
-
-        self.assertEqual(alerta_atualizado.estado, "SILENCIADO")
+    def test_destinatario_invalido(self):
+        with self.assertRaises(ErroS3):
+            self.criar(destinatarios=["portaria"])
 
 
 class TestCicloDeVida(unittest.TestCase):
     """Transições de estado e comandos repetidos."""
 
     def setUp(self):
-        self.service = AlertService()
+        self.service = AlertService(roteador=roteador())
+        self.alerta_id = self.service.processar_evento_roteado(evento()).alerta_id
 
-        evento = EventoQualificado(
-            evento_id="evt-ciclo",
-            tipo="VIOLACAO_EPI",
-            origem="S2",
-            timestamp="2026-09-18T10:00:00Z",
-            confianca=0.96,
-        )
-
-        self.alerta = self.service.processar_evento(
-            evento=evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"],
-        )
-
-        self.alerta_id = self.alerta.alerta_id
-
-    def _acoes(self):
+    def acoes(self):
         return [
             registro.acao
             for registro in self.service.repository.buscar_historico(
@@ -371,113 +131,117 @@ class TestCicloDeVida(unittest.TestCase):
             )
         ]
 
+    def estado(self):
+        return self.service.repository.buscar_por_id(self.alerta_id).estado
+
+    def test_reconhecer(self):
+        alerta = self.service.reconhecer_alerta(
+            self.alerta_id, "user:maria", "verificado"
+        )
+
+        self.assertEqual(alerta.estado, "ACKNOWLEDGED")
+        self.assertEqual(alerta.reconhecido_por, "user:maria")
+        self.assertIsNotNone(alerta.reconhecido_em)
+
+        ultimo = self.service.repository.buscar_historico(self.alerta_id)[-1]
+        self.assertEqual(ultimo.motivo, "verificado")
+
     def test_reconhecer_duas_vezes(self):
         """ACK repetido é rejeitado e não duplica o histórico."""
 
-        self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+        self.service.reconhecer_alerta(self.alerta_id, "user:maria")
 
-        with self.assertRaises(ValueError):
-            self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+        with self.assertRaises(ErroS3) as contexto:
+            self.service.reconhecer_alerta(self.alerta_id, "user:maria")
 
-        self.assertEqual(self._acoes(), ["CRIADO", "RECONHECIDO"])
-        self.assertEqual(self.alerta.estado, "RECONHECIDO")
+        self.assertEqual(contexto.exception.codigo, INVALID_TRANSITION)
+        self.assertEqual(self.acoes(), ["CREATED", "ACKNOWLEDGED"])
 
-    def test_silenciar_duas_vezes_nao_duplica_historico(self):
-        """MUTE repetido é rejeitado e não duplica o histórico."""
-
-        self.service.silenciar_alerta(self.alerta_id, "sup-01")
-
-        with self.assertRaises(ValueError):
-            self.service.silenciar_alerta(self.alerta_id, "sup-01")
-
-        self.assertEqual(self._acoes(), ["CRIADO", "SILENCIADO"])
-
-    def test_ciclo_completo(self):
-        """CRIADO → RECONHECIDO → SILENCIADO → ENCERRADO."""
-
-        self.service.reconhecer_alerta(self.alerta_id, "sup-01")
-        self.service.silenciar_alerta(self.alerta_id, "sup-01")
-        alerta = self.service.encerrar_alerta(self.alerta_id, "sup-02")
-
-        self.assertEqual(alerta.estado, "ENCERRADO")
-        self.assertEqual(
-            self._acoes(),
-            ["CRIADO", "RECONHECIDO", "SILENCIADO", "ENCERRADO"],
+    def test_silenciar_com_prazo(self):
+        alerta = self.service.silenciar_alerta(
+            self.alerta_id, "user:maria", FUTURO
         )
 
-        ultimo = self.service.repository.buscar_historico(
-            self.alerta_id
-        )[-1]
+        self.assertEqual(alerta.estado, "MUTED")
+        self.assertEqual(alerta.silenciado_ate, FUTURO)
 
-        self.assertEqual(ultimo.autor_id, "sup-02")
-        self.assertIsNotNone(ultimo.registrado_em.tzinfo)
-
-    def test_encerrar_direto(self):
-        """Um alerta recém-criado pode ser encerrado."""
-
-        alerta = self.service.encerrar_alerta(self.alerta_id, "sup-01")
-
-        self.assertEqual(alerta.estado, "ENCERRADO")
-
-    def test_encerrar_duas_vezes(self):
-        """Encerramento repetido é rejeitado."""
-
-        self.service.encerrar_alerta(self.alerta_id, "sup-01")
-
+    def test_silenciar_sem_prazo(self):
         with self.assertRaises(ValueError):
-            self.service.encerrar_alerta(self.alerta_id, "sup-01")
+            self.service.silenciar_alerta(self.alerta_id, "user:maria", None)
 
-        self.assertEqual(self._acoes(), ["CRIADO", "ENCERRADO"])
+        self.assertEqual(self.estado(), "CREATED")
+
+    def test_silenciado_nao_pode_ser_reconhecido(self):
+        self.service.silenciar_alerta(self.alerta_id, "user:maria", FUTURO)
+
+        with self.assertRaises(ErroS3):
+            self.service.reconhecer_alerta(self.alerta_id, "user:maria")
+
+    def test_ciclo_completo(self):
+        """CREATED → ACKNOWLEDGED → MUTED → CLOSED."""
+
+        self.service.reconhecer_alerta(self.alerta_id, "user:maria")
+        self.service.silenciar_alerta(self.alerta_id, "user:maria", FUTURO)
+        alerta = self.service.encerrar_alerta(self.alerta_id, "user:joao")
+
+        self.assertEqual(alerta.estado, "CLOSED")
+        self.assertEqual(alerta.encerrado_por, "user:joao")
+        self.assertEqual(alerta.reconhecido_por, "user:maria")
+        self.assertEqual(
+            self.acoes(), ["CREATED", "ACKNOWLEDGED", "MUTED", "CLOSED"]
+        )
 
     def test_encerrado_e_estado_final(self):
-        """Nenhum comando é aceito após o encerramento."""
+        self.service.encerrar_alerta(self.alerta_id, "user:maria")
 
-        self.service.encerrar_alerta(self.alerta_id, "sup-01")
+        for comando in (
+            lambda: self.service.reconhecer_alerta(self.alerta_id, "user:x"),
+            lambda: self.service.silenciar_alerta(self.alerta_id, "user:x", FUTURO),
+            lambda: self.service.encerrar_alerta(self.alerta_id, "user:x"),
+        ):
+            with self.assertRaises(ErroS3):
+                comando()
 
-        with self.assertRaises(ValueError):
-            self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+        self.assertEqual(self.acoes(), ["CREATED", "CLOSED"])
 
-        with self.assertRaises(ValueError):
-            self.service.silenciar_alerta(self.alerta_id, "sup-01")
+    def test_alerta_inexistente(self):
+        with self.assertRaises(ErroS3) as contexto:
+            self.service.encerrar_alerta("alerta-x", "user:maria")
 
-        self.assertEqual(self.alerta.estado, "ENCERRADO")
-
-    def test_encerrar_inexistente(self):
-        with self.assertRaises(ValueError):
-            self.service.encerrar_alerta("alerta-x", "sup-01")
+        self.assertEqual(contexto.exception.codigo, ALERT_NOT_FOUND)
 
     def test_comando_sem_autor_nao_muda_estado(self):
-        """Sem autor, o comando falha e o estado é mantido."""
+        for autor in ("", "   "):
+            with self.assertRaises(ValueError):
+                self.service.encerrar_alerta(self.alerta_id, autor)
 
-        with self.assertRaises(ValueError):
-            self.service.encerrar_alerta(self.alerta_id, "")
-
-        self.assertEqual(self.alerta.estado, "CRIADO")
-        self.assertEqual(self._acoes(), ["CRIADO"])
+        self.assertEqual(self.estado(), "CREATED")
+        self.assertEqual(self.acoes(), ["CREATED"])
 
     def test_evento_repetido_apos_mudanca_de_estado(self):
         """Reenvio do evento não recria nem reseta o alerta."""
 
-        self.service.reconhecer_alerta(self.alerta_id, "sup-01")
+        self.service.reconhecer_alerta(self.alerta_id, "user:maria")
 
-        evento = EventoQualificado(
-            evento_id="evt-ciclo",
-            tipo="VIOLACAO_EPI",
-            origem="S2",
-            timestamp="2026-09-18T10:00:00Z",
-            confianca=0.96,
-        )
-
-        alerta = self.service.processar_evento(
-            evento=evento,
-            severidade="ALTA",
-            destinatarios=["supervisor-01"],
-            canais=["SOM"],
-        )
+        alerta = self.service.processar_evento_roteado(evento())
 
         self.assertEqual(alerta.alerta_id, self.alerta_id)
-        self.assertEqual(alerta.estado, "RECONHECIDO")
-        self.assertEqual(self._acoes(), ["CRIADO", "RECONHECIDO"])
+        self.assertEqual(alerta.estado, "ACKNOWLEDGED")
+
+
+class TestConsultarAlertas(unittest.TestCase):
+
+    def test_filtrar_por_estado(self):
+        service = AlertService(roteador=roteador())
+
+        primeiro = service.processar_evento_roteado(evento())
+        service.processar_evento_roteado(evento(evento_id="evt-002"))
+        service.encerrar_alerta(primeiro.alerta_id, "user:maria")
+
+        encerrados, proximo = service.consultar_alertas(estado="CLOSED")
+
+        self.assertEqual([a.alerta_id for a in encerrados], [primeiro.alerta_id])
+        self.assertIsNone(proximo)
 
 
 if __name__ == "__main__":

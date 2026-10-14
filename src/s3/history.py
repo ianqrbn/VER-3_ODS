@@ -1,34 +1,36 @@
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import uuid4
+
+from s3.envelope import agora
 
 "modelo do registro auditável"
 'Registra o histórico'
+
+ACOES = {"CREATED", "ACKNOWLEDGED", "MUTED", "CLOSED"}
 
 
 @dataclass(frozen=True)
 class RegistroHistorico:
     """
     Representa uma ação registrada no histórico
-    de um alerta.
-
-    Modelo interno provisório do S3.
+    de um alerta. A ação é o estado resultante.
     """
 
     alerta_id: str
-    evento_id: str
     acao: str
 
     autor_id: str | None = None
+    evento_id: str | None = None
+    motivo: str | None = None              # reason
+    silenciado_ate: datetime | None = None  # muted_until
 
     registro_id: str = field(
         default_factory=lambda: str(uuid4())
     )
 
-    registrado_em: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    registrado_em: datetime = field(default_factory=agora)
 
     def __post_init__(self) -> None:
         """Valida o registro após sua criação."""
@@ -38,32 +40,29 @@ class RegistroHistorico:
                 "O registro precisa de um alerta."
             )
 
-        if not self.evento_id:
-            raise ValueError(
-                "O registro precisa de um evento."
-            )
-
-        acoes_permitidas = {
-            "CRIADO",
-            "RECONHECIDO",
-            "SILENCIADO",
-            "ENCERRADO"
-        }
-
-        if self.acao not in acoes_permitidas:
+        if self.acao not in ACOES:
             raise ValueError(
                 "Ação de histórico inválida."
             )
 
-        if self.acao != "CRIADO" and not self.autor_id:
+        if self.acao != "CREATED" and (
+            not isinstance(self.autor_id, str)
+            or not self.autor_id.strip()
+        ):
             raise ValueError(
                 "A ação precisa identificar o responsável."
             )
 
-        if (
-            self.registrado_em.tzinfo is None
-            or self.registrado_em.utcoffset() is None
-        ):
+        if self.acao == "MUTED" and self.silenciado_ate is None:
             raise ValueError(
-                "O horário precisa conter fuso horário."
+                "O silenciamento precisa de mute_until."
             )
+
+        for horario in (self.registrado_em, self.silenciado_ate):
+            if horario is not None and (
+                horario.tzinfo is None
+                or horario.utcoffset() is None
+            ):
+                raise ValueError(
+                    "O horário precisa conter fuso horário."
+                )

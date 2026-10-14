@@ -1,19 +1,12 @@
 
 import json
 import unittest
-from pathlib import Path
 
+from s3.errors import ErroS3
 from s3.ingestion import IngestorEventos
-from s3.repository import AlertRepository
-from s3.routing import (
-    ConfiguracaoRoteamento,
-    RoteadorAlertas,
-)
 from s3.service import AlertService
 
-ARQUIVO_ENTRADA = (
-    Path(__file__).resolve().parents[2] / "jsons" / "entrada.json"
-)
+from fabricas import mensagem_evento, roteador, texto_json
 
 
 class TestIngestorEventos(unittest.TestCase):
@@ -21,216 +14,112 @@ class TestIngestorEventos(unittest.TestCase):
     def setUp(self):
         """Prepara os componentes para cada teste."""
 
-        self.repository = AlertRepository()
+        self.service = AlertService(roteador=roteador())
+        self.repository = self.service.repository
+        self.ingestor = IngestorEventos(self.service)
 
-        configuracao = ConfiguracaoRoteamento(
-            severidade="ALTA",
-            destinatarios=("supervisor-01",),
-            canais=("SOM", "TELA"),
+    def receber(self, dados):
+        return self.ingestor.receber(json.dumps(dados))
+
+    def test_receber_arquivo_entrada_json(self):
+        """O exemplo jsons/entrada.json deve virar alerta."""
+
+        alerta = self.ingestor.receber(texto_json("entrada.json"))
+
+        self.assertEqual(alerta.evento_id, "6d9f2b1c-3e4a-4b5c-8d6e-7f8a9b0c1d2e")
+        self.assertEqual(alerta.severidade, "HIGH")
+        self.assertEqual(alerta.titulo, "EPI ausente: luva")
+
+    def test_receber_bytes(self):
+        """O Kafka entrega bytes."""
+
+        alerta = self.ingestor.receber(
+            json.dumps(mensagem_evento()).encode("utf-8")
         )
 
-        roteador = RoteadorAlertas(
-            regras={
-                "VIOLACAO_EPI": configuracao
-            }
-        )
+        self.assertIsNotNone(alerta)
 
-        service = AlertService(
-            repository=self.repository,
-            roteador=roteador,
-        )
+    def test_json_malformado(self):
+        with self.assertRaises(ValueError):
+            self.ingestor.receber('{"event_id":')
 
-        self.ingestor = IngestorEventos(service)
+    def test_envelope_invalido(self):
+        """Envelope fora do contrato é rejeitado."""
 
-        self.dados = {
+        for alteracao in (
+            {"schema": "ods.s3.alert"},
+            {"message_type": "command"},
+            {"schema_version": "2.0"},
+            {"session_id": None},
+        ):
+            with self.subTest(alteracao=alteracao):
+                with self.assertRaises(ErroS3):
+                    self.receber(mensagem_evento(**alteracao))
+
+    def test_formato_antigo_rejeitado(self):
+        """O formato provisório, sem envelope, não é mais aceito."""
+
+        antigo = {
             "evento_id": "evt-001",
             "tipo": "VIOLACAO_EPI",
             "origem": "S2",
             "timestamp": "2026-09-18T10:00:00Z",
             "confianca": 0.96,
-            "pessoa_id": "pessoa-37",
-            "zona_id": "producao",
-            "evidencia_ref": "evidencia-001",
         }
 
-    def test_receber_evento_valido(self):
-        """Deve transformar JSON em alerta."""
+        with self.assertRaises(ErroS3):
+            self.receber(antigo)
 
-        mensagem = json.dumps(self.dados)
+    def test_payload_incompleto(self):
+        dados = mensagem_evento()
+        del dados["payload"]["rule_id"]
 
-        alerta = self.ingestor.receber(mensagem)
-
-        self.assertEqual(
-            alerta.evento_id,
-            "evt-001"
-        )
-
-        self.assertEqual(
-            alerta.severidade,
-            "ALTA"
-        )
-
-        self.assertEqual(
-            alerta.destinatarios,
-            ["supervisor-01"]
-        )
-
-        self.assertEqual(
-            alerta.canais,
-            ["SOM", "TELA"]
-        )
-
-        alerta_salvo = self.repository.buscar_por_evento(
-            "evt-001"
-        )
-
-        self.assertIs(alerta, alerta_salvo)
-
-    def test_json_malformado(self):
-        """Deve rejeitar uma mensagem JSON inválida."""
-
-        mensagem = '{"evento_id":'
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(mensagem)
-
-    def test_json_nao_objeto(self):
-        """A mensagem precisa conter um objeto JSON."""
-
-        mensagem = json.dumps(
-            ["evento", "invalido"]
-        )
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(mensagem)
-
-    def test_evento_sem_campo_obrigatorio(self):
-        """Deve rejeitar campos obrigatórios ausentes."""
-
-        del self.dados["evento_id"]
-
-        mensagem = json.dumps(self.dados)
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(mensagem)
-
-    def test_evento_sem_roteamento(self):
-        """Não deve criar alerta sem regra configurada."""
-
-        self.dados["tipo"] = "EVENTO_DESCONHECIDO"
-
-        mensagem = json.dumps(self.dados)
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(mensagem)
+        with self.assertRaises(ErroS3):
+            self.receber(dados)
 
         self.assertIsNone(
-            self.repository.buscar_por_evento("evt-001")
+            self.repository.buscar_por_evento(dados["payload"]["event_id"])
         )
 
-    def test_evento_repetido(self):
-        """Não deve criar outro alerta para o mesmo evento."""
+    def test_evento_sem_rota(self):
+        """Tipo sem rota: nenhum alerta, sem erro."""
 
-        mensagem = json.dumps(self.dados)
+        self.assertIsNone(
+            self.receber(mensagem_evento({"event_type": "ZONE_ENTER"}))
+        )
 
-        alerta1 = self.ingestor.receber(mensagem)
-        alerta2 = self.ingestor.receber(mensagem)
+    def test_mesma_mensagem_duas_vezes(self):
+        """O message_id repetido é descartado."""
 
+        dados = mensagem_evento()
+
+        self.assertIsNotNone(self.receber(dados))
+        self.assertIsNone(self.receber(dados))
+
+    def test_mesmo_evento_outra_mensagem(self):
+        """Outra mensagem (fase UPDATED) do mesmo evento devolve o mesmo alerta."""
+
+        primeiro = self.receber(mensagem_evento())
+        segundo = self.receber(
+            mensagem_evento({"phase": "UPDATED", "duration_ms": 15000})
+        )
+
+        self.assertEqual(primeiro.alerta_id, segundo.alerta_id)
         self.assertEqual(
-            alerta1.alerta_id,
-            alerta2.alerta_id
+            len(self.repository.buscar_historico(primeiro.alerta_id)), 1
         )
 
-        historico = self.repository.buscar_historico(
-            alerta1.alerta_id
+    def test_falha_permite_reentrega(self):
+        """Mensagem que falhou não é marcada como processada."""
+
+        dados = mensagem_evento({"confidence": 1.5})
+
+        with self.assertRaises(ErroS3):
+            self.receber(dados)
+
+        self.assertFalse(
+            self.repository.mensagem_processada(dados["message_id"])
         )
-
-        self.assertEqual(len(historico), 1)
-        self.assertEqual(historico[0].acao, "CRIADO")
-
-    def _envelope(self):
-        return {
-            "message_type": "event",
-            "schema": "ods.eventos.qualificados",
-            "schema_version": "1.0",
-            "producer": "S2",
-            "published_at": "2026-09-18T10:00:01Z",
-            "payload": self.dados,
-        }
-
-    def test_receber_envelope_documentado(self):
-        """Deve aceitar o evento dentro do envelope."""
-
-        alerta = self.ingestor.receber(
-            json.dumps(self._envelope())
-        )
-
-        self.assertEqual(alerta.evento_id, "evt-001")
-        self.assertEqual(alerta.evidencia_ref, "evidencia-001")
-
-    def test_receber_arquivo_entrada_json(self):
-        """O exemplo jsons/entrada.json deve ser aceito."""
-
-        with open(ARQUIVO_ENTRADA, encoding="utf-8") as arquivo:
-            mensagem = arquivo.read()
-
-        alerta = self.ingestor.receber(mensagem)
-
-        self.assertEqual(alerta.evento_id, "evt-001")
-        self.assertEqual(alerta.severidade, "ALTA")
-
-    def test_envelope_com_payload_nao_objeto(self):
-        """O payload precisa ser um objeto JSON."""
-
-        envelope = self._envelope()
-        envelope["payload"] = ["evento"]
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(json.dumps(envelope))
-
-    def test_envelope_com_tipo_invalido(self):
-        """Deve rejeitar message_type diferente de event."""
-
-        envelope = self._envelope()
-        envelope["message_type"] = "command"
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(json.dumps(envelope))
-
-    def test_envelope_com_schema_invalido(self):
-        """Deve rejeitar schema diferente do esperado."""
-
-        envelope = self._envelope()
-        envelope["schema"] = "ods.alertas.alerta"
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(json.dumps(envelope))
-
-    def test_envelope_sem_producer(self):
-        """O envelope precisa identificar o produtor."""
-
-        envelope = self._envelope()
-        del envelope["producer"]
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(json.dumps(envelope))
-
-    def test_envelope_com_payload_incompleto(self):
-        """Campos obrigatórios do payload continuam exigidos."""
-
-        envelope = self._envelope()
-        del envelope["payload"]["tipo"]
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(json.dumps(envelope))
-
-    def test_confianca_nao_numerica(self):
-        """Confiança em texto deve gerar ValueError."""
-
-        self.dados["confianca"] = "0.9"
-
-        with self.assertRaises(ValueError):
-            self.ingestor.receber(json.dumps(self.dados))
 
 
 if __name__ == "__main__":

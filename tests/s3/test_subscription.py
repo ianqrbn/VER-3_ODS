@@ -1,101 +1,100 @@
 
+import json
 import unittest
 
+from s3.commands import ProcessadorComandos
 from s3.ingestion import IngestorEventos
-from s3.repository import AlertRepository
-from s3.routing import ConfiguracaoRoteamento, RoteadorAlertas
 from s3.service import AlertService
-from s3.subscription import ConectorEventos
+from s3.subscription import ConectorComandos, ConectorEventos, DespachanteS3
 
-
-class AssinanteFalso:
-    """
-    Simula um assinante de barramento para testes, sem broker real.
-
-    Guarda o callback registrado e permite "publicar" mensagens
-    manualmente, como se o B2 estivesse entregando eventos.
-    """
-
-    def __init__(self):
-        self.callback = None
-
-    def assinar(self, callback):
-        self.callback = callback
-
-    def publicar(self, mensagem):
-        if self.callback is None:
-            raise RuntimeError("Nenhum callback registrado.")
-
-        return self.callback(mensagem)
+from fabricas import (
+    AssinanteFalso,
+    PublicadorFalso,
+    comando,
+    mensagem_evento,
+    roteador,
+)
 
 
 class TestConectorEventos(unittest.TestCase):
 
     def setUp(self):
-        """Prepara um S3 completo e um assinante falso no lugar do B2."""
+        """Prepara um S3 completo e um assinante falso no lugar do Kafka."""
 
-        self.repository = AlertRepository()
-
-        self.regra = ConfiguracaoRoteamento(
-            severidade="ALTA",
-            destinatarios=("supervisor-01",),
-            canais=("SOM", "TELA"),
-        )
-
-        self.roteador = RoteadorAlertas(
-            {"VIOLACAO_EPI": self.regra}
-        )
-
-        self.service = AlertService(
-            repository=self.repository,
-            roteador=self.roteador,
-        )
-
-        self.ingestor = IngestorEventos(self.service)
-
+        self.service = AlertService(roteador=roteador())
         self.assinante = AssinanteFalso()
-
         self.conector = ConectorEventos(
-            assinante=self.assinante,
-            ingestor=self.ingestor,
-        )
-
-        self.mensagem = (
-            '{"evento_id": "evt-100", "tipo": "VIOLACAO_EPI", '
-            '"origem": "S2", "timestamp": "2026-10-07T10:00:00Z", '
-            '"confianca": 0.9}'
+            self.assinante, IngestorEventos(self.service)
         )
 
     def test_conectar_registra_callback(self):
-        """conectar() deve registrar o ingestor como callback do assinante."""
-
         self.conector.conectar()
 
-        self.assertIsNotNone(self.assinante.callback)
-        self.assertEqual(self.assinante.callback, self.ingestor.receber)
+        self.assertEqual(self.assinante.callback, self.conector.entregar)
 
     def test_mensagem_publicada_gera_alerta(self):
-        """Uma mensagem publicada pelo assinante deve virar um alerta roteado."""
+        self.conector.conectar()
+
+        alerta = self.assinante.publicar(json.dumps(mensagem_evento()))
+
+        self.assertEqual(alerta.severidade, "HIGH")
+
+    def test_mensagem_invalida_descartada_com_log(self):
+        """Mensagem inválida não interrompe o consumo: é descartada e logada."""
 
         self.conector.conectar()
 
-        alerta = self.assinante.publicar(self.mensagem)
+        with self.assertLogs("s3.subscription", level="WARNING") as logs:
+            resultado = self.assinante.publicar('{"quebrado":')
 
-        self.assertEqual(alerta.evento_id, "evt-100")
-        self.assertEqual(alerta.severidade, "ALTA")
-        self.assertEqual(alerta.destinatarios, ["supervisor-01"])
-        self.assertEqual(alerta.canais, ["SOM", "TELA"])
-
-        alerta_salvo = self.repository.buscar_por_evento("evt-100")
-
-        self.assertIsNotNone(alerta_salvo)
-        self.assertEqual(alerta_salvo.alerta_id, alerta.alerta_id)
+        self.assertIsNone(resultado)
+        self.assertIn("descartada", logs.output[0])
 
     def test_publicar_sem_conectar_falha(self):
-        """Sem conectar(), o assinante não tem callback para entregar."""
-
         with self.assertRaises(RuntimeError):
-            self.assinante.publicar(self.mensagem)
+            self.assinante.publicar(json.dumps(mensagem_evento()))
+
+
+class TestDespachante(unittest.TestCase):
+
+    def setUp(self):
+        service = AlertService(roteador=roteador())
+        self.respostas = PublicadorFalso()
+        self.assinante = AssinanteFalso()
+
+        DespachanteS3(
+            ConectorEventos(self.assinante, IngestorEventos(service)),
+            ConectorComandos(
+                self.assinante, ProcessadorComandos(service), self.respostas
+            ),
+        ).conectar(self.assinante)
+
+    def test_evento_e_comando_no_mesmo_assinante(self):
+        """ods.s2.event vai ao ingestor; comandos geram reply publicada."""
+
+        alerta = self.assinante.publicar(json.dumps(mensagem_evento()))
+
+        self.assinante.publicar(json.dumps(comando(
+            "ods.s3.alert_action.command",
+            {"alert_id": alerta.alerta_id, "action": "ACKNOWLEDGE", "actor": "user:maria"},
+        )))
+
+        self.assertEqual(len(self.respostas.mensagens), 1)
+        self.assertEqual(
+            self.respostas.mensagens[0]["payload"]["state"], "ACKNOWLEDGED"
+        )
+
+    def test_comando_invalido_sem_reply(self):
+        with self.assertLogs("s3.subscription", level="WARNING"):
+            self.assinante.publicar(json.dumps(comando(
+                "ods.s3.alert_action.command", {}, target="S4"
+            )))
+
+        self.assertEqual(self.respostas.mensagens, [])
+
+    def test_json_invalido(self):
+        with self.assertLogs("s3.subscription", level="WARNING"):
+            self.assertIsNone(self.assinante.publicar(b"\xff"))
 
 
 if __name__ == "__main__":

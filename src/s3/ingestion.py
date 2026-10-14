@@ -1,99 +1,56 @@
 
-import json
-
 from s3.alert import Alerta
 from s3.contracts import EventoQualificado
+from s3.envelope import PERFIL_EV_SERVICO, decodificar, validar_envelope
 from s3.service import AlertService
 
 'adaptador de JSON'
-'Recebe o JSON do B3 e transforma em dados'
+'Recebe ods.s2.event do barramento e transforma em evento'
 
-SCHEMA_ENTRADA = "ods.eventos.qualificados"
+SCHEMA_ENTRADA = "ods.s2.event"
+
 
 class IngestorEventos:
     """
-    Recebe mensagens JSON e as encaminha ao S3.
+    Recebe mensagens ods.s2.event e as encaminha ao S3.
 
-    Adaptador provisório de entrada.
-    A integração com B3 será adicionada depois.
+    Mensagem inválida gera ErroS3 (ValueError): quem
+    assina o barramento descarta e registra em log.
     """
 
     def __init__(self, service: AlertService) -> None:
         self.service = service
 
-    def receber(self, mensagem: str) -> Alerta:
+    def receber(self, mensagem: str | bytes) -> Alerta | None:
         """
-        Converte uma mensagem JSON em evento qualificado
-        e solicita seu processamento.
+        Valida a mensagem e processa o evento.
+
+        Retorna o alerta do evento, ou None se o evento
+        não gera alerta ou se a mensagem já foi processada.
         """
 
-        # 1. Decodificar a mensagem.
-        try:
-            dados = json.loads(mensagem)
-        except (json.JSONDecodeError, TypeError) as erro:
-            raise ValueError(
-                "Mensagem JSON inválida."
-            ) from erro
+        # 1. Decodificar e validar o envelope.
+        dados = decodificar(mensagem)
 
-        # 2. Verificar a estrutura básica.
-        if not isinstance(dados, dict):
-            raise ValueError(
-                "A mensagem deve conter um objeto JSON."
-            )
-
-        # 3. Extrair o payload, se a mensagem vier no envelope
-        #    documentado em jsons/entrada.json.
-        if "payload" in dados:
-            dados = self._abrir_envelope(dados)
-
-        # 4. Construir o evento.
-        try:
-            evento = EventoQualificado(**dados)
-        except TypeError as erro:
-            raise ValueError(
-                "Estrutura do evento inválida."
-            ) from erro
-
-        # 5. Validar o evento.
-        evento.validar()
-
-        # 6. Encaminhar para o serviço.
-        return self.service.processar_evento_roteado(
-            evento
+        validar_envelope(
+            dados, SCHEMA_ENTRADA, "event", PERFIL_EV_SERVICO
         )
 
-    @staticmethod
-    def _abrir_envelope(dados: dict) -> dict:
-        """
-        Valida o envelope provisório e retorna o payload.
+        # 2. Descartar a mesma mensagem recebida de novo.
+        message_id = dados["message_id"]
+        repository = self.service.repository
 
-        Envelope conforme jsons/entrada.json; o schema
-        oficial ainda depende do B1.
-        """
+        if repository.mensagem_processada(message_id):
+            return None
 
-        if dados.get("message_type") != "event":
-            raise ValueError(
-                "Tipo de mensagem inválido."
-            )
+        # 3. Construir e validar o evento.
+        evento = EventoQualificado.de_mensagem(dados)
 
-        if dados.get("schema") != SCHEMA_ENTRADA:
-            raise ValueError(
-                "Schema da mensagem inválido."
-            )
+        # 4. Encaminhar para o serviço.
+        alerta = self.service.processar_evento_roteado(evento)
 
-        for campo in ("schema_version", "producer"):
-            valor = dados.get(campo)
+        # Só marca depois de processar: se falhar,
+        # a mensagem pode ser entregue de novo.
+        repository.registrar_mensagem(message_id)
 
-            if not isinstance(valor, str) or not valor.strip():
-                raise ValueError(
-                    f"O envelope precisa de {campo}."
-                )
-
-        payload = dados["payload"]
-
-        if not isinstance(payload, dict):
-            raise ValueError(
-                "O payload deve ser um objeto JSON."
-            )
-
-        return payload
+        return alerta

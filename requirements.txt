@@ -1,0 +1,3 @@
+# O núcleo do S3 usa só a biblioteca padrão (Python 3.10+).
+# Necessário apenas para ligar o S3 ao Kafka (python -m s3).
+confluent-kafka>=2.3

@@ -1,0 +1,14 @@
+{
+  "routes": [
+    {
+      "event_type": "PPE_NON_COMPLIANT",
+      "min_status": "CONFIRMED",
+      "severity": "HIGH",
+      "recipients": ["role:supervisor"],
+      "channels": ["SCREEN", "PUSH"],
+      "title": "EPI ausente: {equipment_item}",
+      "message": "Pessoa sem {equipment_item} em {zone_id} há {duration_s} s",
+      "capture": true
+    }
+  ]
+}

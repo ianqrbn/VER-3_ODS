@@ -1,0 +1,16 @@
+{
+  "message_type": "command",
+  "message_id": "4b5c6d7e-8f90-4a1b-8c2d-3e4f5a6b7c8d",
+  "schema": "ods.s3.alert.command",
+  "schema_version": "1.0",
+  "producer": "A2",
+  "published_at": "2026-09-23T14:31:00.000Z",
+  "target": "S3",
+  "payload": {
+    "title": "Acesso negado",
+    "message": "Crachá CRACHA-0427 recusado na portaria",
+    "severity": "MEDIUM",
+    "recipients": ["group:portaria"],
+    "channels": ["SCREEN"]
+  }
+}
