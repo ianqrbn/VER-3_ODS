@@ -109,6 +109,18 @@ class TestIngestorEventos(unittest.TestCase):
             len(self.repository.buscar_historico(primeiro.alerta_id)), 1
         )
 
+    def test_ended_sem_alerta_marca_processada(self):
+        """ENDED sem alerta não gera alerta nem fica para reprocessar."""
+
+        dados = mensagem_evento({"phase": "ENDED"})
+
+        with self.assertLogs("s3.service", level="WARNING"):
+            self.assertIsNone(self.receber(dados))
+
+        self.assertTrue(
+            self.repository.mensagem_processada(dados["message_id"])
+        )
+
     def test_falha_permite_reentrega(self):
         """Mensagem que falhou não é marcada como processada."""
 

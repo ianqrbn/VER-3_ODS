@@ -37,7 +37,9 @@ Os nomes internos (`Alerta`, `EventoQualificado`, `evento_id`…) continuam em p
    - `timestamp` aceitava qualquer texto; agora todo horário precisa ser ISO 8601 com fuso;
    - autor feito só de espaços era aceito; agora é rejeitado;
    - severidade, estado e canal não eram conferidos; agora são.
-4. **Teste duplicado.** `test_reconhecer_alerta` tinha duas definições e uma apagava a outra (corrigido na revisão anterior).
+4. **`ENDED` criava alerta.** Um `ENDED` de evento sem alerta existente criava um alerta novo para uma violação já terminada. Agora não cria, e o caso é registrado em log.
+5. **`actor` sem formato.** O `actor` dos comandos aceitava qualquer texto. Agora precisa ser `user:<id>`.
+6. **Teste duplicado.** `test_reconhecer_alerta` tinha duas definições e uma apagava a outra (corrigido na revisão anterior).
 
 ## Testes
 
@@ -46,7 +48,7 @@ $env:PYTHONPATH = "src"
 python -m pytest tests/s3 -q
 ```
 
-**Resultado:** 172 testes e 60 subtestes passando (pytest e unittest).
+**Resultado:** 176 testes e 63 subtestes passando (pytest e unittest).
 
 O que os testes cobrem:
 - envelope e horários;
@@ -72,7 +74,7 @@ O que os testes **não** cobrem: broker real, persistência durável, envio real
 4. **`Analise_Projeto_S3_ODS.pdf` está desatualizado** em relação a este documento.
 
 ### Com outras equipes
-As 9 perguntas estão na seção "Pendências com outras equipes" do [README.md](README.md). As mais urgentes:
+As 11 perguntas estão na seção "Pendências com outras equipes" do [README.md](README.md). As mais urgentes:
 - o nome dos tópicos (TRA-1);
 - como o S3 obtém o `clip_id` (TRA-1 e MOD-2);
 - o comportamento nas fases `UPDATED` e `ENDED` (VER-6 e A5).

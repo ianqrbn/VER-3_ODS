@@ -70,6 +70,32 @@ class TestProcessarEvento(unittest.TestCase):
         historico = self.service.repository.buscar_historico(primeiro.alerta_id)
         self.assertEqual(len(historico), 1)
 
+    def test_updated_sem_alerta_cria(self):
+        """UPDATED sem alerta: o STARTED se perdeu e a violação continua."""
+
+        alerta = self.service.processar_evento_roteado(evento(fase="UPDATED"))
+
+        self.assertEqual(alerta.estado, "CREATED")
+
+    def test_ended_sem_alerta_nao_cria(self):
+        """ENDED sem alerta: a violação já terminou, nenhum alerta novo."""
+
+        with self.assertLogs("s3.service", level="WARNING"):
+            alerta = self.service.processar_evento_roteado(evento(fase="ENDED"))
+
+        self.assertIsNone(alerta)
+        self.assertIsNone(self.service.repository.buscar_por_evento("evt-001"))
+
+    def test_ended_nao_encerra_alerta(self):
+        """Fim da violação não é encerramento do atendimento."""
+
+        primeiro = self.service.processar_evento_roteado(evento())
+
+        alerta = self.service.processar_evento_roteado(evento(fase="ENDED"))
+
+        self.assertEqual(alerta.alerta_id, primeiro.alerta_id)
+        self.assertEqual(alerta.estado, "CREATED")
+
     def test_ids_diferentes(self):
         primeiro = self.service.processar_evento(evento(), rota())
         segundo = self.service.processar_evento(evento(evento_id="evt-002"), rota())

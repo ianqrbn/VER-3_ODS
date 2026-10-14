@@ -1,4 +1,5 @@
 
+import logging
 from datetime import datetime
 from uuid import uuid4
 
@@ -19,6 +20,8 @@ from s3.routing import (
 
 "criação/orquestração"
 "cria o alerta"
+
+logger = logging.getLogger(__name__)
 
 # Estado de destino → estados de origem permitidos.
 # A especificação define os estados, não as transições:
@@ -58,13 +61,17 @@ class AlertService:
         self,
         evento: EventoQualificado,
         rota: ConfiguracaoRoteamento,
-    ) -> Alerta:
+    ) -> Alerta | None:
         """
         Cria o alerta de um evento, um por event_id.
 
-        As fases UPDATED e ENDED do mesmo evento devolvem
-        o alerta existente sem alterá-lo (pendente: o que
-        fazer em UPDATED e ENDED depende da VER-6 e da A5).
+        Com alerta existente, qualquer fase devolve o alerta
+        sem alterá-lo. Sem alerta existente, STARTED e UPDATED
+        criam (UPDATED: o STARTED se perdeu, a violação segue);
+        ENDED não cria, porque a violação já terminou.
+
+        O fim da violação (ENDED) não encerra o alerta: o
+        encerramento é ação humana (CLOSE). Pendente com o A5.
         """
 
         evento.validar()
@@ -76,6 +83,13 @@ class AlertService:
 
         if alerta_existente is not None:
             return alerta_existente
+
+        if evento.fase == "ENDED":
+            logger.warning(
+                "ENDED sem alerta existente; nenhum alerta criado: %s",
+                evento.evento_id,
+            )
+            return None
 
         alerta = Alerta(
             alerta_id=str(uuid4()),

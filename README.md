@@ -38,7 +38,9 @@ Há exemplos completos de cada mensagem em [`jsons/`](jsons/).
 
 - A especificação define os estados, mas **não as transições**. Esta tabela é decisão do VER-3 e ainda precisa ser revisada (ver pendências).
 - Transição fora da tabela → reply `ERROR` com `INVALID_TRANSITION`, sem alterar nada.
-- Cada ação gera um registro de histórico imutável, com autor (`actor`), motivo (`reason`) e horário com fuso.
+- Cada ação gera um registro de histórico imutável, com autor (`actor`, no formato `user:<id>`), motivo (`reason`) e horário com fuso.
+- O alerta publicado mostra quem reconheceu e encerrou e até quando está silenciado. O contrato não tem `muted_by`: o autor do MUTE fica só no histórico interno.
+- A idempotência dos comandos depende do repositório: com a persistência em memória, ela se perde quando o processo reinicia.
 - O alerta publicado traz `acknowledged_by/at`, `muted_until` e `closed_by/at`.
 
 ## Regras de mensagens
@@ -47,7 +49,9 @@ Há exemplos completos de cada mensagem em [`jsons/`](jsons/).
 - **Mensagem inválida** (JSON quebrado, envelope ou payload fora do contrato) é **descartada e registrada em log**, nunca processada "na tentativa".
 - **Duplicatas:**
   - mensagem com `message_id` já processado é descartada;
-  - o mesmo `event_id` gera um alerta só; as fases `UPDATED` e `ENDED` não criam outro;
+  - o mesmo `event_id` gera um alerta só. Se o alerta já existe, as fases `UPDATED` e `ENDED` não o alteram;
+  - sem alerta existente, `UPDATED` cria (o `STARTED` se perdeu e a violação continua) e `ENDED` não cria (a violação já terminou);
+  - o fim da violação (`ENDED`) **não** encerra o alerta: o encerramento é ação humana (`CLOSE`);
   - comando repetido (mesmo `message_id`) recebe **a mesma reply**, sem novo efeito.
 - **Roteamento:**
   - tipo de evento sem rota não gera alerta e não é erro;
@@ -116,6 +120,8 @@ python -m s3 --routing jsons/routing_a5.json --versao-routing routing-a5-1 --tem
 - **Persistência em memória.** Alertas, histórico e `message_id` processados se perdem quando o processo reinicia. A escolha do banco é decisão da squad: cada build tem o seu, e o P3 opera o armazenamento.
 - **Falha ao publicar.** Se o barramento falhar ao publicar `ods.s3.alert`, o alerta já ficou salvo e a mensagem se perde. A solução (fila de saída no banco) depende da persistência.
 - **`clip_id`.** Alertas roteados não recebem o `clip_id`, mesmo com `capture: true` (ver pendência 4).
+- **Entrega das notificações.** A arquitetura atribui os canais ao S3, mas não há contrato de entrega física. Hoje o S3 só publica `channels` no alerta: não toca som nem envia push (ver pendência 10).
+- **Texto do alerta.** `title` e `message` usam os valores do primeiro evento recebido; as fases `UPDATED` não os atualizam.
 - **`MUTE`.** Quando o prazo `mute_until` vence, o alerta continua `MUTED`.
 - **Concorrência.** O serviço supõe um consumidor por processo.
 
@@ -130,9 +136,11 @@ Itens da revisão da especificação (seção 10, item 17), em que o VER-3 é re
 | 3 | Tópico das replies e como elas chegam a quem pediu | TRA-1 |
 | 4 | Como o S3 obtém o `clip_id` do S4, se a lista de consumo do S3 é fechada em S2 | TRA-1, MOD-2 |
 | 5 | `session_id` e `sequence` em alertas criados por comando, que não têm sessão de origem | TRA-1, TRA-2 |
-| 6 | O que fazer nas fases `UPDATED` (atualizar a mensagem?) e `ENDED` (encerrar o alerta?) | VER-6, A5 |
+| 6 | Nas fases `UPDATED` e `ENDED`: atualizar a mensagem? Encerrar o alerta quando a violação termina? | VER-6, A5 |
 | 7 | Transições permitidas e o que acontece quando `mute_until` vence | A5, B6 |
 | 8 | Autorização: quem pode mandar ACKNOWLEDGE, MUTE e CLOSE | A5, TRA-1 |
 | 9 | Códigos de erro que não estão na especificação: `INVALID_PAYLOAD` e `INVALID_MESSAGE` | TRA-1 |
+| 10 | Quem executa e interrompe a entrega física de `SOUND` e `PUSH` (inclusive em ACK, MUTE, CLOSE e no vencimento de `mute_until`) | TRA-1, A5 |
+| 11 | Campo `muted_by` no alerta, para o registro de quem desligou (RF6 do A5) | TRA-1, A5 |
 
 O estado completo do componente está em [README_S3_ODS.md](README_S3_ODS.md).

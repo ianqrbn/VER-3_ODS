@@ -108,6 +108,9 @@ class TestAlertAction(BaseComandos):
         for dados in (
             self.acao("DELETE"),
             self.acao("ACKNOWLEDGE", actor="  "),
+            self.acao("ACKNOWLEDGE", actor="maria"),
+            self.acao("ACKNOWLEDGE", actor="role:supervisor"),
+            self.acao("ACKNOWLEDGE", actor="user:"),
         ):
             with self.subTest(dados=dados["payload"]):
                 resposta = self.enviar(dados)

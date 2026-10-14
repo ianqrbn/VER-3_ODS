@@ -162,6 +162,12 @@ class ProcessadorComandos:
         autor = _texto(payload, "actor")
         motivo = _texto(payload, "reason", obrigatorio=False)
 
+        # Contrato: actor = user:<id>.
+        if not autor.startswith("user:") or not autor[5:].strip():
+            raise ErroS3(
+                INVALID_PAYLOAD, f"actor deve ser user:<id>: {autor!r}"
+            )
+
         if acao == "ACKNOWLEDGE":
             alerta = self.service.reconhecer_alerta(alerta_id, autor, motivo)
         elif acao == "MUTE":
