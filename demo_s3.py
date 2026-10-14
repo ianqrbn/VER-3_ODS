@@ -3,7 +3,8 @@ Demonstração ao vivo do componente S3 (Alertas e Notificações).
 
 Simula o S2 publicando um evento qualificado através de um assinante
 falso (substituto do broker real do B2, que ainda não existe), e mostra
-o alerta passando pelo roteamento, criação, reconhecimento e silenciamento.
+o alerta passando pelo roteamento, criação, reconhecimento, silenciamento
+e encerramento, com cada mudança publicada por um publicador falso.
 
 Para rodar:
     PowerShell:  $env:PYTHONPATH = "src"; python demo_s3.py
@@ -30,6 +31,13 @@ class AssinanteDemo:
         return self.callback(mensagem)
 
 
+class PublicadorDemo:
+    """Substituto do publicador real do B2: só imprime o que sairia."""
+
+    def publicar(self, mensagem):
+        print(f"   [saída → aplicações] {mensagem}")
+
+
 def titulo(texto):
     print()
     print("=" * 60)
@@ -54,7 +62,11 @@ def main():
         )
     })
 
-    service = AlertService(repository=repo, roteador=roteador)
+    service = AlertService(
+        repository=repo,
+        roteador=roteador,
+        publicador=PublicadorDemo(),
+    )
     ingestor = IngestorEventos(service)
     print("AlertRepository, RoteadorAlertas, AlertService e IngestorEventos prontos.")
 
@@ -116,6 +128,11 @@ def main():
     primeiro = assinante.publicar(mensagem)
     segundo = assinante.publicar(mensagem)
     print(f"Mesmo alerta_id? {primeiro.alerta_id == segundo.alerta_id}")
+
+    titulo("9. Supervisor encerra o alerta")
+
+    alerta = service.encerrar_alerta(alerta.alerta_id, autor_id="supervisor-01")
+    print(f"Novo estado: {alerta.estado}")
 
     titulo("Fim da demonstração")
 

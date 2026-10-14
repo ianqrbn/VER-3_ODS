@@ -4,6 +4,8 @@ from uuid import uuid4
 from s3.contracts import EventoQualificado
 from s3.alert import Alerta
 from s3.history import RegistroHistorico
+from s3.output import alerta_para_json
+from s3.publication import PublicadorAlertas
 from s3.repository import AlertRepository
 from s3.routing import RoteadorAlertas
 
@@ -26,6 +28,7 @@ class AlertService:
         self,
         repository: AlertRepository | None = None,
         roteador: RoteadorAlertas | None = None,
+        publicador: PublicadorAlertas | None = None,
     ) -> None:
 
         self.repository = (
@@ -35,6 +38,9 @@ class AlertService:
         )
 
         self.roteador = roteador
+
+        # Opcional: sem publicador, nada é enviado às aplicações.
+        self.publicador = publicador
 
     def criar_alerta(
         self,
@@ -83,6 +89,7 @@ class AlertService:
             )
         )
 
+        # Evento repetido: não cria nem publica de novo.
         if alerta_existente is not None:
             return alerta_existente
 
@@ -96,6 +103,8 @@ class AlertService:
 
         # Salva o alerta e registra sua criação.
         self.repository.salvar(alerta)
+
+        self._publicar(alerta)
 
         return alerta
 
@@ -197,4 +206,17 @@ class AlertService:
 
         alerta.estado = novo_estado
 
+        self._publicar(alerta)
+
         return alerta
+
+    def _publicar(self, alerta: Alerta) -> None:
+        """
+        Envia o estado atual do alerta às aplicações,
+        no envelope de jsons/saida.json.
+        """
+
+        if self.publicador is None:
+            return
+
+        self.publicador.publicar(alerta_para_json(alerta))
