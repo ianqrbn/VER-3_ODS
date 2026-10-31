@@ -20,7 +20,7 @@ from src.adapters.coco_dataset_adapter import CocoDatasetAdapter
 from src.core.evaluation import EvaluationModule
 from src.core.inference import RelationInferenceModule
 from src.core.pairing import PairingModule
-from src.domain.models import RelationalEvent
+from src.domain.models import CalibrationStatus, ComplianceEvent
 from src.domain.policy import EquipmentPolicy
 
 
@@ -78,23 +78,23 @@ def main() -> None:
     for i, frame in enumerate(dataset):
         if (i + 1) % 100 == 0:
             print(f"  {i + 1}/{len(dataset)}")
-        tracking_frame = frame.to_tracking_frame()
-        pairing_result = pairing.pair(tracking_frame)
+        detection_frame = frame.to_detection_frame()
+        pairing_result = pairing.pair(detection_frame)
         evaluations = inference.infer(pairing_result)
 
-        event = RelationalEvent(
-            camera_id=tracking_frame.camera_id,
-            session_id=tracking_frame.session_id,
-            frame=tracking_frame.frame,
-            captured_at=tracking_frame.captured_at,
-            frame_width=tracking_frame.frame_width,
-            frame_height=tracking_frame.frame_height,
-            calibration=None,  # type: ignore
-            policy_id=policy.policy_id,
-            policy_version=policy.version,
+        event = ComplianceEvent(
+            source_id=detection_frame.source_id,
+            session_id=detection_frame.session_id,
+            captured_at=detection_frame.captured_at,
+            sequence=detection_frame.sequence,
+            frame_index=detection_frame.frame_index,
+            image_width=detection_frame.image_width,
+            image_height=detection_frame.image_height,
+            artifact_version=policy.artifact_version,
+            calibration=CalibrationStatus(),
             relations=tuple(evaluations),
             unassociated_equipment=tuple(pairing_result.unassociated_equipment),
-            ignored_tracks=tuple(pairing_result.ignored_tracks),
+            ignored_detections=tuple(pairing_result.ignored_detections),
         )
         predictions.append(event)
 

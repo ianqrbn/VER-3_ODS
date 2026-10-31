@@ -32,7 +32,6 @@ from src.domain.models import (
     AnnotatedFrame,
     AnnotatedTrack,
     RelationalState,
-    TrackingFrame,
     utc_now_iso,
 )
 
@@ -218,15 +217,15 @@ class CocoDatasetAdapter:
         equipment_by_class: Dict[str, List[AnnotatedTrack]] = defaultdict(list)
         for eq in equipments:
             if eq.raw_class == "hardhat":
-                equipment_by_class["CAPACETES"].append(eq)
+                equipment_by_class["capacete"].append(eq)
             elif eq.raw_class == "vest":
-                equipment_by_class["COLETES"].append(eq)
+                equipment_by_class["colete"].append(eq)
 
         # Infer ground truth para cada worker
         result: Dict[Tuple[int, str], RelationalState] = {}
 
         for worker in workers:
-            for canonical_class in ["CAPACETES", "COLETES"]:
+            for canonical_class in ["capacete", "colete"]:
                 has_equipment = len(equipment_by_class[canonical_class]) > 0
 
                 if worker_class == "Unsafe Worker":
@@ -238,14 +237,14 @@ class CocoDatasetAdapter:
 
                 elif worker_class == "Worker -only hat-":
                     # Só com capacete: capacete CORRETO, colete AUSENTE
-                    if canonical_class == "CAPACETES":
+                    if canonical_class == "capacete":
                         result[(worker.track_id, canonical_class)] = RelationalState.CORRETO if has_equipment else RelationalState.AUSENTE
                     else:
                         result[(worker.track_id, canonical_class)] = RelationalState.AUSENTE
 
                 elif worker_class == "Worker -only vest-":
                     # Só com colete: capacete AUSENTE, colete CORRETO
-                    if canonical_class == "COLETES":
+                    if canonical_class == "colete":
                         result[(worker.track_id, canonical_class)] = RelationalState.CORRETO if has_equipment else RelationalState.AUSENTE
                     else:
                         result[(worker.track_id, canonical_class)] = RelationalState.AUSENTE

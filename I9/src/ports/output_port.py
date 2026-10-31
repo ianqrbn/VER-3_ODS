@@ -1,14 +1,14 @@
 from typing import Protocol
 
-from src.domain.models import RelationalEvent
+from src.domain.models import ComplianceEvent
 
 
 class OutputPort(Protocol):
     """
-    Protocolo de publicação dos eventos relacionais (I9 / `ods.inferencia.relacional`),
-    consumidos pelos módulos de conformidade (S2/A5).
+    Protocolo de publicação da conformidade de EPI (I9 / `ods.i9.ppe_compliance`),
+    consumida por S2 e A5.
     """
 
-    def publish_event(self, event: RelationalEvent) -> None:
+    def publish_event(self, event: ComplianceEvent) -> None:
         """Publica o evento contendo os estados relacionais gerados pela inferência."""
         ...

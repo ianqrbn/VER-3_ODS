@@ -17,12 +17,18 @@ from src.domain.models import (  # noqa: E402
     SCHEMA_VERSION,
     BoundingBox,
     Calibration,
-    TrackingFrame,
+    DetectionFrame,
     utc_now_iso,
 )
 from src.domain.policy import EquipmentPolicy  # noqa: E402
 
 POLICY_PATH = ROOT / "config" / "policy.json"
+
+# As caixas dos testes são escritas na convenção interna (origem inferior) e
+# convertidas para o formato do I1 ([x1, y1, x2, y2], origem superior) em
+# `make_detection`, exercitando a conversão do parsing.
+IMAGE_WIDTH = 1920
+IMAGE_HEIGHT = 1080
 
 # pessoa de referência: 256 x 744, base em y=268, topo em y=1012
 PERSON_BOX = BoundingBox(412, 268, 668, 1012)
@@ -61,50 +67,56 @@ def make_bbox(x_min: float, y_min: float, width: float, height: float) -> Boundi
     return BoundingBox(x_min, y_min, x_min + width, y_min + height)
 
 
-def make_track(
-    track_id: int,
+def make_detection(
+    detection_id: int,
     class_name: str,
     bbox: BoundingBox,
-    state: str = "confirmed",
+    confidence: float = 1.0,
 ) -> Dict[str, Any]:
     return {
-        "track_id": track_id,
+        "detection_id": detection_id,
         "class": class_name,
-        "state": state,
-        "u_px": bbox.center_x,
-        "v_px": bbox.center_y,
-        "predicted": state == "predicted",
-        "bbox": bbox.as_dict(),
+        "confidence": confidence,
+        "bbox": bbox.to_image_list(IMAGE_HEIGHT),
+    }
+
+
+def make_event(
+    detections: Iterable[Dict[str, Any]],
+    source_id: str = "CAM-01",
+    frame_index: int = 1,
+) -> Dict[str, Any]:
+    return {
+        "message_type": "event",
+        "message_id": "a8f5f167-99b4-4d2b-8b1e-6c9a2e4f1d3b",
+        "schema": "ods.i1.detections",
+        "schema_version": SCHEMA_VERSION,
+        "producer": "I1",
+        "published_at": utc_now_iso(),
+        "captured_at": "2026-09-23T14:05:12.400Z",
+        "source_id": source_id,
+        "session_id": "sess-teste",
+        "sequence": frame_index,
+        "artifact_version": "app-epi-1.0.0",
+        "payload": {
+            "frame_index": frame_index,
+            "image_width": IMAGE_WIDTH,
+            "image_height": IMAGE_HEIGHT,
+            "detections": list(detections),
+        },
     }
 
 
 def make_frame(
-    tracks: Iterable[Dict[str, Any]],
-    camera_id: str = "CAM-01",
-    frame: int = 1,
-) -> TrackingFrame:
-    payload = {
-        "camera_id": camera_id,
-        "session_id": "sess-teste",
-        "captured_at": "2026-09-23T14:05:12.400Z",
-        "frame": frame,
-        "frame_width": 1920,
-        "frame_height": 1080,
-        "tracks": list(tracks),
-    }
-    event = {
-        "message_type": "event",
-        "schema": "ods.inferencia.rastreio",
-        "schema_version": SCHEMA_VERSION,
-        "producer": "I2",
-        "published_at": utc_now_iso(),
-        "payload": payload,
-    }
-    return TrackingFrame.from_event(event)
+    detections: Iterable[Dict[str, Any]],
+    source_id: str = "CAM-01",
+    frame_index: int = 1,
+) -> DetectionFrame:
+    return DetectionFrame.from_event(make_event(detections, source_id, frame_index))
 
 
 def make_calibration(
-    camera_id: str = "CAM-01",
+    source_id: str = "CAM-01",
     calibration_version: str = "cam-01-v3",
     reprojection_rms_cm: float = 1.8,
     holdout_points: int = 6,
@@ -113,12 +125,12 @@ def make_calibration(
     return Calibration.from_event(
         {
             "message_type": "event",
-            "schema": "ods.inferencia.calibracao",
+            "schema": "ods.i3.calibration",
             "schema_version": SCHEMA_VERSION,
             "producer": "I3",
             "published_at": utc_now_iso(),
+            "source_id": source_id,
             "payload": {
-                "camera_id": camera_id,
                 "calibration_version": calibration_version,
                 "valid_from": "2026-09-23T13:58:00.000Z",
                 "homography": [
@@ -140,12 +152,15 @@ def make_calibration(
 
 
 def equipment_by_class(event_dict: Dict[str, Any], index: int = 0) -> Dict[str, Any]:
-    """Mapeia classe -> item de equipamento da relação indicada."""
-    return {item["class"]: item for item in event_dict["payload"]["relations"][index]["equipment"]}
+    """Mapeia classe -> item de equipamento da pessoa indicada."""
+    return {
+        item["equipment_item"]: item
+        for item in event_dict["payload"]["persons"][index]["equipment"]
+    }
 
 
 def evidence_of(event_dict: Dict[str, Any], class_name: str, index: int = 0) -> Dict[str, Any]:
-    for item in event_dict["payload"]["relations"][index]["equipment"]:
-        if item["class"] == class_name:
+    for item in event_dict["payload"]["persons"][index]["equipment"]:
+        if item["equipment_item"] == class_name:
             return item["evidence"]
     raise AssertionError(f"classe {class_name!r} ausente na relação {index}")

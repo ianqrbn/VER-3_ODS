@@ -1,7 +1,7 @@
 """
 Avaliação do pipeline I9 contra dataset annotado.
 
-Compara as predições (RelationalEvent) com o ground truth (AnnotatedFrame)
+Compara as predições (ComplianceEvent) com o ground truth (AnnotatedFrame)
 e calcula métricas de classificação: precision, recall, F1 por classe e
 F1 macro (média não ponderada de CORRETO, INCORRETO, AUSENTE).
 """
@@ -15,7 +15,7 @@ from src.domain.models import (
     AnnotatedFrame,
     EquipmentEvaluation,
     PersonEvaluation,
-    RelationalEvent,
+    ComplianceEvent,
     RelationalState,
 )
 
@@ -102,7 +102,7 @@ class EvaluationModule:
 
     def evaluate(
         self,
-        predictions: List[RelationalEvent],
+        predictions: List[ComplianceEvent],
         ground_truth: List[AnnotatedFrame],
     ) -> EvaluationResult:
         """Avalia as predições contra o ground truth.
@@ -125,11 +125,12 @@ class EvaluationModule:
         total_gt = 0
 
         for pred in predictions:
-            gt = gt_by_frame.get((pred.camera_id, pred.frame))
+            gt = gt_by_frame.get((pred.source_id, pred.frame_index))
             if gt is None:
                 continue
 
-            # Mapeia ground truth por (person_track_id, canonical_class)
+            # Mapeia ground truth por (person_track_id, canonical_class); o track_id
+            # anotado vira o detection_id em AnnotatedFrame.to_detection_frame()
             if self.is_coco:
                 gt_map = self._build_gt_map_coco(gt)
             else:
@@ -139,7 +140,7 @@ class EvaluationModule:
                 for equip_eval in person_eval.equipment:
                     predicted_state = equip_eval.state
                     gt_state = gt_map.get(
-                        (person_eval.person.track_id, equip_eval.canonical_class)
+                        (person_eval.person.detection_id, equip_eval.canonical_class)
                     )
 
                     total_pred += 1
@@ -240,22 +241,22 @@ class EvaluationModule:
         for worker in workers:
             if worker_class == "Unsafe Worker":
                 # Unsafe Worker: equipamento presente -> INCORRETO, ausente -> AUSENTE
-                result[(worker.track_id, "CAPACETES")] = RelationalState.INCORRETO if has_hardhat else RelationalState.AUSENTE
-                result[(worker.track_id, "COLETES")] = RelationalState.INCORRETO if has_vest else RelationalState.AUSENTE
+                result[(worker.track_id, "capacete")] = RelationalState.INCORRETO if has_hardhat else RelationalState.AUSENTE
+                result[(worker.track_id, "colete")] = RelationalState.INCORRETO if has_vest else RelationalState.AUSENTE
 
             elif worker_class == "Worker -only hat-":
                 # Só com capacete: capacete CORRETO, colete AUSENTE
-                result[(worker.track_id, "CAPACETES")] = RelationalState.CORRETO if has_hardhat else RelationalState.AUSENTE
-                result[(worker.track_id, "COLETES")] = RelationalState.AUSENTE
+                result[(worker.track_id, "capacete")] = RelationalState.CORRETO if has_hardhat else RelationalState.AUSENTE
+                result[(worker.track_id, "colete")] = RelationalState.AUSENTE
 
             elif worker_class == "Worker -only vest-":
                 # Só com colete: capacete AUSENTE, colete CORRETO
-                result[(worker.track_id, "CAPACETES")] = RelationalState.AUSENTE
-                result[(worker.track_id, "COLETES")] = RelationalState.CORRETO if has_vest else RelationalState.AUSENTE
+                result[(worker.track_id, "capacete")] = RelationalState.AUSENTE
+                result[(worker.track_id, "colete")] = RelationalState.CORRETO if has_vest else RelationalState.AUSENTE
 
             elif worker_class == "Safe Worker":
                 # Safe Worker: equipamento presente -> CORRETO, ausente -> AUSENTE
-                result[(worker.track_id, "CAPACETES")] = RelationalState.CORRETO if has_hardhat else RelationalState.AUSENTE
-                result[(worker.track_id, "COLETES")] = RelationalState.CORRETO if has_vest else RelationalState.AUSENTE
+                result[(worker.track_id, "capacete")] = RelationalState.CORRETO if has_hardhat else RelationalState.AUSENTE
+                result[(worker.track_id, "colete")] = RelationalState.CORRETO if has_vest else RelationalState.AUSENTE
 
         return result

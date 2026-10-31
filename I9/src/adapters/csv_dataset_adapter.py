@@ -10,7 +10,7 @@ Formato esperado do CSV (uma linha por track):
 
 * ``relational_state`` é o ground truth (CORRETO/INCORRETO/AUSENTE) — vazio para pessoas.
 * ``homografia`` é opcional (pode estar em coluna separada ou em arquivo auxiliar).
-* Tracks são agrupadas por ``(camera_id, frame)`` para reconstruir ``TrackingFrame``.
+* Tracks são agrupadas por ``(camera_id, frame)`` para reconstruir ``DetectionFrame``.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from src.domain.models import (
     AnnotatedFrame,
     AnnotatedTrack,
     RelationalState,
-    TrackingFrame,
     utc_now_iso,
 )
 

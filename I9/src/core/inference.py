@@ -7,27 +7,31 @@ Para cada pessoa e para cada classe de EPI definida na política:
 * EPI associado abaixo do threshold -> INCORRETO (pertence à pessoa, mas está
   fora do lugar esperado);
 * nenhum EPI associado -> AUSENTE, com confiança baixa e limitada por
-  `absence_max`, já que não existe informação de oclusão no contrato.
+  `absence_max`, já que a ausência não distingue oclusão.
 
-O módulo é **stateless**: nenhuma regra temporal é aplicada aqui, conforme a
-responsabilidade definida para o componente de rastreio (I2).
+A confiança geométrica é multiplicada pela confiança da detecção do I1 (do EPI,
+ou da pessoa no caso de AUSENTE). Um item sai `uncertain` quando a confiança
+final fica abaixo de `uncertain_below` ou quando a pessoa está severamente
+ocluída por outra pessoa.
+
+O módulo é **stateless**: o cruzamento temporal é responsabilidade do S2.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+from dataclasses import replace
+from typing import Dict, List, Tuple
 
 from src.core.geometry import normalized_position, zone_score
 from src.domain.body_zones import ZoneGeometry
 from src.domain.models import (
+    Detection,
     EquipmentEvaluation,
     EquipmentMatch,
     PairingResult,
     PersonEvaluation,
     PersonRelation,
     RelationalState,
-    Track,
-    TrackState,
 )
 from src.domain.policy import EquipmentPolicy
 
@@ -44,10 +48,24 @@ class RelationInferenceModule:
             for item in pairing.unassociated_equipment
         }
 
-        return [self._infer_person(relation, dangling) for relation in pairing.relations]
+        persons = [relation.person for relation in pairing.relations]
+        return [
+            self._infer_person(relation, dangling, self._uncertain_reasons(relation.person, persons))
+            for relation in pairing.relations
+        ]
+
+    def _uncertain_reasons(self, person: Detection, persons: List[Detection]) -> Tuple[str, ...]:
+        """Motivos que tornam incerta toda a avaliação da pessoa no quadro."""
+        threshold = self.policy.confidence.occlusion_overlap
+        for other in persons:
+            if other.detection_id == person.detection_id:
+                continue
+            if other.bbox.containment(person.bbox) >= threshold:
+                return ("severe_occlusion",)
+        return ()
 
     def _infer_person(
-        self, relation: PersonRelation, dangling: Dict[str, float]
+        self, relation: PersonRelation, dangling: Dict[str, float], reasons: Tuple[str, ...]
     ) -> PersonEvaluation:
         matches = {match.canonical_class: match for match in relation.equipment}
         evaluations: List[EquipmentEvaluation] = []
@@ -66,7 +84,11 @@ class RelationInferenceModule:
                     )
                 )
 
-        return PersonEvaluation(person=relation.person, equipment=tuple(evaluations))
+        if reasons:
+            evaluations = [replace(e, uncertain=True) for e in evaluations]
+        return PersonEvaluation(
+            person=relation.person, equipment=tuple(evaluations), uncertain_reasons=reasons
+        )
 
     def _zone_geometry(self, canonical: str, person_bbox=None) -> ZoneGeometry:
         """Geometria da zona, considerando zonas customizadas e aspect ratio.
@@ -107,16 +129,15 @@ class RelationInferenceModule:
 
     def _evaluate_detected(
         self,
-        person: Track,
+        person: Detection,
         canonical: str,
         required: bool,
         match: EquipmentMatch,
     ) -> EquipmentEvaluation:
         rule = self.policy.rules[canonical]
         zone_geometry = self._zone_geometry(canonical, person.bbox)
-        u, v = normalized_position(match.track.bbox, person.bbox)
+        u, v = normalized_position(match.detection.bbox, person.bbox)
         placement = zone_score(u, v, zone_geometry)
-        factor = self._state_factor(match.track)
 
         if placement >= self.policy.confidence.correct_threshold:
             state = RelationalState.CORRETO
@@ -125,59 +146,46 @@ class RelationInferenceModule:
             state = RelationalState.INCORRETO
             confidence = match.association_score * (1.0 - placement)
 
-        confidence *= factor
-        ceiling = self.policy.confidence.max_confidence
+        confidence = min(self.policy.confidence.max_confidence, max(0.0, confidence))
+        confidence *= match.detection.confidence
         evidence: Dict[str, object] = {
-            "association_score_pct": round(match.association_score * 100.0, 2),
-            "placement_score_pct": round(placement * 100.0, 2),
+            "association_score": round(match.association_score, 4),
+            "placement_score": round(placement, 4),
+            "detection_confidence": match.detection.confidence,
             "person_normalized_center": {"u": round(u, 4), "v": round(v, 4)},
             "expected_zone": rule.zone.value,
         }
         if match.ground_distance_m is not None:
             evidence["ground_distance_m"] = round(match.ground_distance_m, 3)
-        if match.track.state is not TrackState.CONFIRMED:
-            evidence["penalty"] = self._penalty_name(match.track)
 
         return EquipmentEvaluation(
             canonical_class=canonical,
             required=required,
             state=state,
-            confidence_pct=min(ceiling, max(0.0, confidence)) * 100.0,
-            track=match.track,
+            confidence=confidence,
+            detection=match.detection,
+            uncertain=self._is_uncertain(confidence),
             evidence=evidence,
         )
 
     def _evaluate_missing(
-        self, person: Track, canonical: str, dangling_factor: float
+        self, person: Detection, canonical: str, dangling_factor: float
     ) -> EquipmentEvaluation:
-        confidence = (
-            self.policy.confidence.absence_base
-            * dangling_factor
-            * self._state_factor(person)
-        )
-        confidence = min(self.policy.confidence.absence_max, confidence)
+        confidence = self.policy.confidence.absence_base * dangling_factor
+        confidence = min(self.policy.confidence.absence_max, confidence) * person.confidence
+        confidence = max(0.0, confidence)
         return EquipmentEvaluation(
             canonical_class=canonical,
             required=True,
             state=RelationalState.AUSENTE,
-            confidence_pct=max(0.0, confidence * 100.0),
-            track=None,
+            confidence=confidence,
+            detection=None,
+            uncertain=self._is_uncertain(confidence),
             evidence={
                 "reason": "no_candidate_in_person_region",
                 "zone": self.policy.rules[canonical].zone.value,
             },
         )
 
-    def _state_factor(self, track: Track) -> float:
-        settings = self.policy.confidence
-        if track.state is TrackState.CONFIRMED:
-            return 1.0
-        if track.state is TrackState.PREDICTED:
-            return settings.predicted_factor
-        return settings.unknown_state_factor
-
-    @staticmethod
-    def _penalty_name(track: Track) -> str:
-        if track.state is TrackState.PREDICTED:
-            return "predicted_track"
-        return "unknown_track_state"
+    def _is_uncertain(self, confidence: float) -> bool:
+        return confidence < self.policy.confidence.uncertain_below

@@ -1,25 +1,33 @@
 """
 Modelos de domínio do componente I9 (verificação geométrica de EPI).
 
-Convenções do contrato de rastreio (I2):
+Arquitetura 6c — o I9 processa **um quadro estático** por vez:
 
-* `u_px` / `v_px` e `bbox` estão no mesmo espaço de pixels;
-* a origem da imagem é o canto **inferior esquerdo** (mesmo sistema do OpenCV);
-* `x_max` e `y_max` são **exclusivos**;
-* cada track carrega seu payload original em `raw`, que é repassado sem
-  alteração no evento de saída.
+* entrada: `ods.i1.detections` (I1) e `ods.i3.calibration` (I3);
+* saída: `ods.i9.ppe_compliance` (envelope EV-SINAL), consumido por S2 e A5.
+
+Convenções:
+
+* o I1 publica `bbox` como `[x1, y1, x2, y2]` em pixels, com origem no canto
+  **superior** esquerdo (y cresce para baixo);
+* internamente o motor geométrico trabalha com origem no canto **inferior**
+  esquerdo (`v` alto = cabeça) e `x_max` / `y_max` exclusivos. A conversão é
+  feita uma única vez, no parsing da detecção;
+* cada detecção carrega o dicionário original em `raw`, e o `detection_id` do
+  I1 é repassado sem alteração para que o S2 faça o cruzamento temporal.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-TRACKING_SCHEMA = "ods.inferencia.rastreio"
-CALIBRATION_SCHEMA = "ods.inferencia.calibracao"
-RELATIONAL_SCHEMA = "ods.inferencia.relacional"
+DETECTIONS_SCHEMA = "ods.i1.detections"
+CALIBRATION_SCHEMA = "ods.i3.calibration"
+COMPLIANCE_SCHEMA = "ods.i9.ppe_compliance"
 SCHEMA_VERSION = "1.0"
 PRODUCER = "I9"
 
@@ -32,14 +40,6 @@ class RelationalState(str, Enum):
     AUSENTE = "AUSENTE"
 
 
-class TrackState(str, Enum):
-    """Estados de rastreio informados pelo I2."""
-
-    CONFIRMED = "confirmed"
-    PREDICTED = "predicted"
-    LOST = "lost"
-
-
 def _require(payload: Mapping[str, Any], key: str, context: str) -> Any:
     if key not in payload:
         raise ValueError(f"{context}: campo obrigatório ausente -> {key!r}")
@@ -47,6 +47,8 @@ def _require(payload: Mapping[str, Any], key: str, context: str) -> Any:
 
 
 def _as_float(value: Any, key: str, context: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{context}: campo inválido -> {key!r}={value!r}")
     try:
         return float(value)
     except (TypeError, ValueError) as exc:
@@ -60,6 +62,17 @@ def _as_int(value: Any, key: str, context: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{context}: campo inválido -> {key!r}={value!r}") from exc
+
+
+def _optional_int(data: Mapping[str, Any], key: str, context: str) -> Optional[int]:
+    value = data.get(key)
+    return None if value is None else _as_int(value, key, context)
+
+
+def _check_schema(event: Mapping[str, Any], expected: str) -> None:
+    schema = event.get("schema")
+    if schema != expected:
+        raise ValueError(f"schema inesperado: esperado {expected!r}, recebido {schema!r}")
 
 
 def utc_now_iso() -> str:
@@ -137,26 +150,26 @@ class BoundingBox:
             "y_max": self.y_max,
         }
 
+    def to_image_list(self, image_height: float) -> List[float]:
+        """Converte para o formato do I1: `[x1, y1, x2, y2]` com origem superior."""
+        return [self.x_min, image_height - self.y_max, self.x_max, image_height - self.y_min]
+
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any], context: str) -> "BoundingBox":
-        return cls(
-            x_min=_as_float(_require(data, "x_min", context), "x_min", context),
-            y_min=_as_float(_require(data, "y_min", context), "y_min", context),
-            x_max=_as_float(_require(data, "x_max", context), "x_max", context),
-            y_max=_as_float(_require(data, "y_max", context), "y_max", context),
-        )
+    def from_image_list(cls, value: Any, image_height: float, context: str) -> "BoundingBox":
+        """Lê `[x1, y1, x2, y2]` (origem superior, formato do I1) para a convenção interna."""
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            raise ValueError(f"{context}: esperado [x1, y1, x2, y2] -> {value!r}")
+        x1, y1, x2, y2 = (_as_float(v, "bbox", context) for v in value)
+        return cls(x_min=x1, y_min=image_height - y2, x_max=x2, y_max=image_height - y1)
 
 
 @dataclass(frozen=True)
-class Track:
-    """Track de rastreio recebida do I2 (pessoa ou equipamento)."""
+class Detection:
+    """Detecção de um quadro recebida do I1 (pessoa ou equipamento)."""
 
-    track_id: int
+    detection_id: int
     raw_class: str
-    state: Optional[TrackState]
-    u_px: float
-    v_px: float
-    predicted: bool
+    confidence: float
     bbox: BoundingBox
     raw: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -165,86 +178,91 @@ class Track:
         return (self.bbox.center_x, self.bbox.center_y)
 
     def as_dict(self) -> Dict[str, Any]:
-        """Repassa o track original sem alteração (garante perda zero de dados)."""
+        """Repassa a detecção original sem alteração (garante perda zero de dados)."""
         return dict(self.raw)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any], index: int = 0) -> "Track":
-        context = f"tracks[{index}]"
-        state_raw = data.get("state")
-        try:
-            state = TrackState(state_raw) if state_raw is not None else None
-        except ValueError:
-            state = None  # estado desconhecido: tratado de forma conservadora
+    def from_dict(cls, data: Mapping[str, Any], image_height: float, index: int = 0) -> "Detection":
+        context = f"detections[{index}]"
+        confidence = _as_float(_require(data, "confidence", context), "confidence", context)
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"{context}: confidence fora de [0, 1] -> {confidence!r}")
 
         return cls(
-            track_id=_as_int(_require(data, "track_id", context), "track_id", context),
+            detection_id=_as_int(_require(data, "detection_id", context), "detection_id", context),
             raw_class=str(_require(data, "class", context)),
-            state=state,
-            u_px=_as_float(_require(data, "u_px", context), "u_px", context),
-            v_px=_as_float(_require(data, "v_px", context), "v_px", context),
-            predicted=bool(data.get("predicted", state is TrackState.PREDICTED)),
-            bbox=BoundingBox.from_dict(_require(data, "bbox", context), f"{context}.bbox"),
+            confidence=confidence,
+            bbox=BoundingBox.from_image_list(
+                _require(data, "bbox", context), image_height, f"{context}.bbox"
+            ),
             raw=dict(data),
         )
 
 
 @dataclass(frozen=True)
-class TrackingFrame:
-    """Payload do evento `ods.inferencia.rastreio` já validado."""
+class DetectionFrame:
+    """Evento `ods.i1.detections` já validado (envelope + payload)."""
 
-    camera_id: str
+    source_id: str
     session_id: str
     captured_at: str
-    frame: Optional[int]
-    frame_width: Optional[int]
-    frame_height: Optional[int]
-    tracks: Tuple[Track, ...]
+    sequence: Optional[int]
+    frame_index: Optional[int]
+    image_width: int
+    image_height: int
+    detections: Tuple[Detection, ...]
+    message_id: Optional[str] = None
+    artifact_version: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
-    def of_state(self, state: TrackState) -> List[Track]:
-        return [t for t in self.tracks if t.state is state]
-
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "TrackingFrame":
-        context = "payload"
-        tracks_raw = _require(payload, "tracks", context)
-        if not isinstance(tracks_raw, list):
-            raise ValueError("payload.tracks: esperado lista")
+    def from_event(cls, event: Mapping[str, Any]) -> "DetectionFrame":
+        """Lê um evento completo do I1 validando o envelope."""
+        _check_schema(event, DETECTIONS_SCHEMA)
+        context = "event"
+        payload = _require(event, "payload", context)
 
-        frame_raw = payload.get("frame")
-        frame = None if frame_raw is None else _as_int(frame_raw, "frame", context)
-        width_raw = payload.get("frame_width")
-        height_raw = payload.get("frame_height")
+        image_height = _as_int(_require(payload, "image_height", "payload"), "image_height", "payload")
+        image_width = _as_int(_require(payload, "image_width", "payload"), "image_width", "payload")
+        detections_raw = _require(payload, "detections", "payload")
+        if not isinstance(detections_raw, list):
+            raise ValueError("payload.detections: esperado lista")
+
+        detections = tuple(
+            Detection.from_dict(d, image_height, i) for i, d in enumerate(detections_raw)
+        )
+        ids = [d.detection_id for d in detections]
+        if len(ids) != len(set(ids)):
+            raise ValueError("payload.detections: detection_id duplicado no quadro")
 
         return cls(
-            camera_id=str(_require(payload, "camera_id", context)),
-            session_id=str(payload.get("session_id", "")),
-            captured_at=str(payload.get("captured_at", "")),
-            frame=frame,
-            frame_width=None if width_raw is None else _as_int(width_raw, "frame_width", context),
-            frame_height=None if height_raw is None else _as_int(height_raw, "frame_height", context),
-            tracks=tuple(Track.from_dict(t, i) for i, t in enumerate(tracks_raw)),
-            raw=dict(payload),
+            source_id=str(_require(event, "source_id", context)),
+            session_id=str(event.get("session_id", "")),
+            captured_at=str(event.get("captured_at", "")),
+            sequence=_optional_int(event, "sequence", context),
+            frame_index=_optional_int(payload, "frame_index", "payload"),
+            image_width=image_width,
+            image_height=image_height,
+            detections=detections,
+            message_id=event.get("message_id"),
+            artifact_version=event.get("artifact_version"),
+            raw=dict(event),
         )
-
-    @classmethod
-    def from_event(cls, event: Mapping[str, Any]) -> "TrackingFrame":
-        """Lê um evento completo do I2 validando o envelope."""
-        schema = event.get("schema")
-        if schema != TRACKING_SCHEMA:
-            raise ValueError(f"schema inesperado: esperado {TRACKING_SCHEMA!r}, recebido {schema!r}")
-        return cls.from_payload(_require(event, "payload", "event"))
 
 
 @dataclass(frozen=True)
 class Calibration:
-    """Calibração de câmera recebida do I3 (homografia imagem -> plano do ambiente)."""
+    """Calibração de câmera recebida do I3 (`ods.i3.calibration`).
 
-    camera_id: str
+    A homografia imagem -> plano do ambiente é opcional: sem ela o I9 continua
+    funcionando, apenas sem o corte métrico de alcance. Parâmetros intrínsecos e
+    de distorção são preservados em `raw`.
+    """
+
+    source_id: str
     calibration_version: str
     valid_from: str
-    homography: Tuple[Tuple[float, ...], ...]
+    homography: Optional[Tuple[Tuple[float, ...], ...]]
     space_id: str
     unit: str
     reprojection_rms_cm: Optional[float]
@@ -267,24 +285,30 @@ class Calibration:
         return 1.0
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "Calibration":
+    def from_payload(cls, payload: Mapping[str, Any], source_id: Optional[str] = None) -> "Calibration":
         context = "calibração"
-        matrix_raw = _require(payload, "homography", context)
-        if not isinstance(matrix_raw, list) or len(matrix_raw) != 3:
-            raise ValueError("calibração.homography: esperado array 3x3")
-        matrix = tuple(
-            tuple(_as_float(v, "homography", context) for v in linha)
-            for linha in matrix_raw
-        )
-        if any(len(linha) != 3 for linha in matrix):
-            raise ValueError("calibração.homography: esperado array 3x3")
+        matrix = None
+        matrix_raw = payload.get("homography")
+        if matrix_raw is not None:
+            if not isinstance(matrix_raw, list) or len(matrix_raw) != 3:
+                raise ValueError("calibração.homography: esperado array 3x3")
+            matrix = tuple(
+                tuple(_as_float(v, "homography", context) for v in linha)
+                for linha in matrix_raw
+            )
+            if any(len(linha) != 3 for linha in matrix):
+                raise ValueError("calibração.homography: esperado array 3x3")
+
+        if source_id is None:
+            source_id = payload.get("source_id", payload.get("camera_id"))
+        if source_id is None:
+            raise ValueError(f"{context}: campo obrigatório ausente -> 'source_id'")
 
         reference = payload.get("reference_frame") or {}
         rms_raw = payload.get("reprojection_rms_cm")
-        holdout_raw = payload.get("holdout_points")
 
         return cls(
-            camera_id=str(_require(payload, "camera_id", context)),
+            source_id=str(source_id),
             calibration_version=str(_require(payload, "calibration_version", context)),
             valid_from=str(payload.get("valid_from", "")),
             homography=matrix,  # type: ignore[arg-type]
@@ -293,44 +317,43 @@ class Calibration:
             reprojection_rms_cm=(
                 None if rms_raw is None else _as_float(rms_raw, "reprojection_rms_cm", context)
             ),
-            holdout_points=None if holdout_raw is None else _as_int(holdout_raw, "holdout_points", context),
+            holdout_points=_optional_int(payload, "holdout_points", context),
             raw=dict(payload),
         )
 
     @classmethod
     def from_event(cls, event: Mapping[str, Any]) -> "Calibration":
-        schema = event.get("schema")
-        if schema != CALIBRATION_SCHEMA:
-            raise ValueError(f"schema inesperado: esperado {CALIBRATION_SCHEMA!r}, recebido {schema!r}")
-        return cls.from_payload(_require(event, "payload", "event"))
+        """Lê um evento completo do I3; a câmera vem do `source_id` do envelope."""
+        _check_schema(event, CALIBRATION_SCHEMA)
+        return cls.from_payload(_require(event, "payload", "event"), event.get("source_id"))
 
 
 @dataclass(frozen=True)
 class EquipmentMatch:
-    """EPI associado a uma pessoa (track detectada, nunca sintética)."""
+    """EPI associado a uma pessoa (detecção real, nunca sintética)."""
 
     canonical_class: str
     required: bool
-    track: Track
+    detection: Detection
     association_score: float
     ground_distance_m: Optional[float] = None
 
 
 @dataclass(frozen=True)
 class PersonRelation:
-    """Pessoa e os EPIs que lhe foram associados no frame."""
+    """Pessoa e os EPIs que lhe foram associados no quadro."""
 
-    person: Track
+    person: Detection
     equipment: Tuple[EquipmentMatch, ...] = ()
 
 
 @dataclass(frozen=True)
 class PairingResult:
-    """Resultado da associação geométrica de um frame."""
+    """Resultado da associação geométrica de um quadro."""
 
     relations: List[PersonRelation]
     unassociated_equipment: List["UnassociatedEquipment"] = field(default_factory=list)
-    ignored_tracks: List["IgnoredTrack"] = field(default_factory=list)
+    ignored_detections: List["IgnoredDetection"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -340,60 +363,75 @@ class EquipmentEvaluation:
     canonical_class: str
     required: bool
     state: RelationalState
-    confidence_pct: float
-    track: Optional[Track]
+    confidence: float
+    detection: Optional[Detection]
+    uncertain: bool = False
     evidence: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "class": self.canonical_class,
-            "required": self.required,
-            "relational_state": self.state.value,
-            "confidence_pct": round(self.confidence_pct, 2),
-            "detection": self.track.as_dict() if self.track else None,
+            "equipment_item": self.canonical_class,
+            "state": self.state.value,
+            "confidence": round(self.confidence, 4),
+            "uncertain": self.uncertain,
+            "detection_id": self.detection.detection_id if self.detection else None,
             "evidence": self.evidence,
         }
 
 
 @dataclass(frozen=True)
 class PersonEvaluation:
-    person: Track
+    person: Detection
     equipment: Tuple[EquipmentEvaluation, ...]
+    uncertain_reasons: Tuple[str, ...] = ()
+
+    @property
+    def uncertain(self) -> bool:
+        return bool(self.uncertain_reasons) or any(e.uncertain for e in self.equipment)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "person": self.person.as_dict(),
+            "detection_id": self.person.detection_id,
+            "class": self.person.raw_class,
+            "confidence": self.person.confidence,
+            "bbox": self.person.raw.get("bbox"),
+            "uncertain": self.uncertain,
+            "uncertain_reasons": list(self.uncertain_reasons),
             "equipment": [e.as_dict() for e in self.equipment],
         }
 
 
 @dataclass(frozen=True)
 class UnassociatedEquipment:
-    """EPI detectado no frame que não pertence a nenhuma pessoa (com segurança)."""
+    """EPI detectado no quadro que não pertence a nenhuma pessoa (com segurança)."""
 
     canonical_class: str
-    track: Track
+    detection: Detection
     reason: str
-    best_association_score_pct: float
+    best_association_score: float
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "class": self.canonical_class,
-            "track": self.track.as_dict(),
+            "equipment_item": self.canonical_class,
+            "detection_id": self.detection.detection_id,
             "reason": self.reason,
-            "best_association_score_pct": round(self.best_association_score_pct, 2),
+            "best_association_score": round(self.best_association_score, 4),
         }
 
 
 @dataclass(frozen=True)
-class IgnoredTrack:
-    """Track recebida mas não utilizada na verificação (ex.: estado `lost`)."""
+class IgnoredDetection:
+    """Detecção recebida mas não utilizada (classe fora da política ou baixa confiança)."""
 
-    track: Track
+    detection: Detection
     reason: str
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"track": self.track.as_dict(), "reason": self.reason}
+        return {
+            "detection_id": self.detection.detection_id,
+            "class": self.detection.raw_class,
+            "reason": self.reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -404,64 +442,80 @@ class CalibrationStatus:
 
 
 @dataclass(frozen=True)
-class RelationalEvent:
-    """Evento de saída do I9 (`ods.inferencia.relacional`), um por quadro."""
+class ComplianceEvent:
+    """Evento de saída do I9 (`ods.i9.ppe_compliance`), um por quadro.
 
-    camera_id: str
+    O envelope segue o EV-SINAL: `source_id`, `session_id`, `captured_at` e
+    `sequence` são os do quadro do I1, para que o S2 case a pessoa com o rastro
+    do I2 pela chave do quadro + `detection_id`.
+    """
+
+    source_id: str
     session_id: str
-    frame: Optional[int]
     captured_at: str
-    frame_width: Optional[int]
-    frame_height: Optional[int]
+    sequence: Optional[int]
+    frame_index: Optional[int]
+    image_width: Optional[int]
+    image_height: Optional[int]
+    artifact_version: str
     calibration: CalibrationStatus
-    policy_id: str
-    policy_version: str
+    catalog_version: Optional[str] = None
     relations: Tuple[PersonEvaluation, ...] = ()
     unassociated_equipment: Tuple[UnassociatedEquipment, ...] = ()
-    ignored_tracks: Tuple[IgnoredTrack, ...] = ()
+    ignored_detections: Tuple[IgnoredDetection, ...] = ()
+    source_message_id: Optional[str] = None
+    message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     published_at: str = field(default_factory=utc_now_iso)
+
+    @property
+    def uncertain(self) -> bool:
+        return any(r.uncertain for r in self.relations)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "message_type": "event",
-            "schema": RELATIONAL_SCHEMA,
+            "message_id": self.message_id,
+            "schema": COMPLIANCE_SCHEMA,
             "schema_version": SCHEMA_VERSION,
             "producer": PRODUCER,
             "published_at": self.published_at,
+            "captured_at": self.captured_at,
+            "source_id": self.source_id,
+            "session_id": self.session_id,
+            "sequence": self.sequence,
+            "artifact_version": self.artifact_version,
             "payload": {
-                "camera_id": self.camera_id,
-                "session_id": self.session_id,
-                "frame": self.frame,
-                "captured_at": self.captured_at,
-                "frame_width": self.frame_width,
-                "frame_height": self.frame_height,
+                "frame_index": self.frame_index,
+                "image_width": self.image_width,
+                "image_height": self.image_height,
+                "source_message_id": self.source_message_id,
+                "catalog_version": self.catalog_version,
                 "calibration_version": self.calibration.version,
                 "calibration_status": self.calibration.status,
-                "policy_id": self.policy_id,
-                "policy_version": self.policy_version,
-                "relations": [r.as_dict() for r in self.relations],
+                "uncertain": self.uncertain,
+                "persons": [r.as_dict() for r in self.relations],
                 "unassociated_equipment": [u.as_dict() for u in self.unassociated_equipment],
-                "ignored_tracks": [i.as_dict() for i in self.ignored_tracks],
+                "ignored_detections": [i.as_dict() for i in self.ignored_detections],
             },
         }
 
-    def track_ids_covered(self) -> set:
+    def detection_ids_covered(self) -> set:
         ids = set()
         for relation in self.relations:
-            ids.add(relation.person.track_id)
+            ids.add(relation.person.detection_id)
             for equipment in relation.equipment:
-                if equipment.track:
-                    ids.add(equipment.track.track_id)
+                if equipment.detection:
+                    ids.add(equipment.detection.detection_id)
         for item in self.unassociated_equipment:
-            ids.add(item.track.track_id)
-        for item in self.ignored_tracks:
-            ids.add(item.track.track_id)
+            ids.add(item.detection.detection_id)
+        for item in self.ignored_detections:
+            ids.add(item.detection.detection_id)
         return ids
 
 
 @dataclass(frozen=True)
 class AnnotatedTrack:
-    """Track de ground truth do dataset anotado (uma linha do CSV)."""
+    """Objeto de ground truth do dataset anotado (uma linha do CSV / anotação COCO)."""
 
     track_id: int
     raw_class: str
@@ -508,30 +562,35 @@ class AnnotatedFrame:
                 return track.relational_state
         return None
 
-    def to_tracking_frame(self) -> TrackingFrame:
-        """Converte para TrackingFrame (para rodar o pipeline)."""
-        tracks = []
-        for t in self.tracks:
-            tracks.append({
-                "track_id": t.track_id,
-                "class": t.raw_class,
-                "state": "confirmed",
-                "u_px": (t.x_min + t.x_max) / 2.0,
-                "v_px": (t.y_min + t.y_max) / 2.0,
-                "predicted": False,
-                "bbox": {
-                    "x_min": t.x_min,
-                    "y_min": t.y_min,
-                    "x_max": t.x_max,
-                    "y_max": t.y_max,
+    def to_detection_frame(self) -> DetectionFrame:
+        """Converte para DetectionFrame (para rodar o pipeline).
+
+        As anotações já estão na convenção interna (origem inferior); o
+        `track_id` anotado vira o `detection_id` e a confiança é 1.0.
+        """
+        image_height = 1080
+        detections = tuple(
+            Detection(
+                detection_id=t.track_id,
+                raw_class=t.raw_class,
+                confidence=1.0,
+                bbox=t.bbox,
+                raw={
+                    "detection_id": t.track_id,
+                    "class": t.raw_class,
+                    "confidence": 1.0,
+                    "bbox": t.bbox.to_image_list(image_height),
                 },
-            })
-        return TrackingFrame.from_payload({
-            "camera_id": self.camera_id,
-            "session_id": f"calib-{self.frame:06d}",
-            "captured_at": utc_now_iso(),
-            "frame": self.frame,
-            "frame_width": 1920,
-            "frame_height": 1080,
-            "tracks": tracks,
-        })
+            )
+            for t in self.tracks
+        )
+        return DetectionFrame(
+            source_id=self.camera_id,
+            session_id=f"calib-{self.frame:06d}",
+            captured_at=utc_now_iso(),
+            sequence=self.frame,
+            frame_index=self.frame,
+            image_width=1920,
+            image_height=image_height,
+            detections=detections,
+        )

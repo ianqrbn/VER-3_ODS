@@ -20,7 +20,7 @@ from src.core.evaluation import EvaluationModule, EvaluationResult
 from src.core.inference import RelationInferenceModule
 from src.core.pairing import PairingModule
 from src.core.pipeline import I9Pipeline
-from src.domain.models import AnnotatedFrame, RelationalEvent
+from src.domain.models import AnnotatedFrame, CalibrationStatus, ComplianceEvent
 from src.domain.policy import EquipmentPolicy
 
 
@@ -72,12 +72,13 @@ class CalibrationResult:
             },
             "confidence": {
                 "correct_threshold": self.best_policy.confidence.correct_threshold,
-                "predicted_factor": self.best_policy.confidence.predicted_factor,
-                "unknown_state_factor": self.best_policy.confidence.unknown_state_factor,
                 "absence_base": self.best_policy.confidence.absence_base,
                 "absence_max": self.best_policy.confidence.absence_max,
                 "absence_candidate_penalty": self.best_policy.confidence.absence_candidate_penalty,
                 "max_confidence": self.best_policy.confidence.max_confidence,
+                "min_detection_confidence": self.best_policy.confidence.min_detection_confidence,
+                "uncertain_below": self.best_policy.confidence.uncertain_below,
+                "occlusion_overlap": self.best_policy.confidence.occlusion_overlap,
             },
             "calibration": {
                 "max_reprojection_rms_cm": self.best_policy.calibration.max_reprojection_rms_cm,
@@ -234,12 +235,13 @@ class RuleCalibrationModule:
         # Extrai parâmetros de confiança
         conf = {
             "correct_threshold": params.get("correct_threshold", base_policy.confidence.correct_threshold),
-            "predicted_factor": params.get("predicted_factor", base_policy.confidence.predicted_factor),
-            "unknown_state_factor": params.get("unknown_state_factor", base_policy.confidence.unknown_state_factor),
             "absence_base": params.get("absence_base", base_policy.confidence.absence_base),
             "absence_max": params.get("absence_max", base_policy.confidence.absence_max),
             "absence_candidate_penalty": params.get("absence_candidate_penalty", base_policy.confidence.absence_candidate_penalty),
             "max_confidence": params.get("max_confidence", base_policy.confidence.max_confidence),
+            "min_detection_confidence": params.get("min_detection_confidence", base_policy.confidence.min_detection_confidence),
+            "uncertain_below": params.get("uncertain_below", base_policy.confidence.uncertain_below),
+            "occlusion_overlap": params.get("occlusion_overlap", base_policy.confidence.occlusion_overlap),
         }
 
         # Extrai parâmetros de calibração
@@ -294,25 +296,25 @@ class RuleCalibrationModule:
         pairing = PairingModule(policy=policy)
         inference = RelationInferenceModule(policy=policy)
 
-        predictions: List[RelationalEvent] = []
+        predictions: List[ComplianceEvent] = []
         for frame in dataset:
-            tracking_frame = frame.to_tracking_frame()
-            pairing_result = pairing.pair(tracking_frame)
+            detection_frame = frame.to_detection_frame()
+            pairing_result = pairing.pair(detection_frame)
             evaluations = inference.infer(pairing_result)
 
-            event = RelationalEvent(
-                camera_id=tracking_frame.camera_id,
-                session_id=tracking_frame.session_id,
-                frame=tracking_frame.frame,
-                captured_at=tracking_frame.captured_at,
-                frame_width=tracking_frame.frame_width,
-                frame_height=tracking_frame.frame_height,
-                calibration=None,  # type: ignore
-                policy_id=policy.policy_id,
-                policy_version=policy.version,
+            event = ComplianceEvent(
+                source_id=detection_frame.source_id,
+                session_id=detection_frame.session_id,
+                captured_at=detection_frame.captured_at,
+                sequence=detection_frame.sequence,
+                frame_index=detection_frame.frame_index,
+                image_width=detection_frame.image_width,
+                image_height=detection_frame.image_height,
+                artifact_version=policy.artifact_version,
+                calibration=CalibrationStatus(),
                 relations=tuple(evaluations),
                 unassociated_equipment=tuple(pairing_result.unassociated_equipment),
-                ignored_tracks=tuple(pairing_result.ignored_tracks),
+                ignored_detections=tuple(pairing_result.ignored_detections),
             )
             predictions.append(event)
 
@@ -330,6 +332,5 @@ class RuleCalibrationModule:
     @staticmethod
     def _conf_param_names() -> set:
         return {
-            "correct_threshold", "predicted_factor", "unknown_state_factor",
-            "absence_base", "absence_max", "absence_candidate_penalty", "max_confidence",
+            "correct_threshold", "absence_base", "absence_max", "absence_candidate_penalty", "max_confidence",
         }

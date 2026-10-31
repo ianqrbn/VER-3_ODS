@@ -10,7 +10,7 @@ from tests.helpers import (
     make_bbox,
     make_calibration,
     make_frame,
-    make_track,
+    make_detection,
     policy_from,
     uncapped_policy,
 )
@@ -19,10 +19,10 @@ from src.core.inference import RelationInferenceModule
 from src.core.pairing import PairingModule
 from src.domain.models import RelationalState
 
-PESSOA = make_track(1, "pessoa", PERSON_BOX)
-CAPACETE_OK = make_track(10, "capacete", make_bbox(468, 884, 144, 150))       # cabeça
-COLETE_OK = make_track(11, "colete", make_bbox(432, 580, 200, 200))            # tronco
-COLETE_NA_CINTURA = make_track(12, "colete", make_bbox(430, 346, 220, 200))    # quadril
+PESSOA = make_detection(1, "pessoa", PERSON_BOX)
+CAPACETE_OK = make_detection(10, "capacete", make_bbox(468, 884, 144, 150))       # cabeça
+COLETE_OK = make_detection(11, "colete", make_bbox(432, 580, 200, 200))            # tronco
+COLETE_NA_CINTURA = make_detection(12, "colete", make_bbox(430, 346, 220, 200))    # quadril
 EPI_LONGE = make_bbox(1600, 200, 100, 120)
 
 
@@ -41,20 +41,21 @@ def item_for(evaluations, index: int, canonical: str):
 class RelationalStateTest(unittest.TestCase):
     def test_epi_no_lugar_certo(self):
         avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_OK])
-        for canonical in ("CAPACETES", "COLETES"):
+        for canonical in ("capacete", "colete"):
             item = item_for(avaliacoes, 0, canonical)
             self.assertIs(item.state, RelationalState.CORRETO, canonical)
-            self.assertGreater(item.confidence_pct, 0.0)
-            self.assertLessEqual(item.confidence_pct, 95.0)
-            self.assertIsNotNone(item.track)
+            self.assertGreater(item.confidence, 0.0)
+            self.assertLessEqual(item.confidence, 0.95)
+            self.assertIsNotNone(item.detection)
+            self.assertFalse(item.uncertain)
 
     def test_epi_no_lugar_errado(self):
         avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_NA_CINTURA])
-        item = item_for(avaliacoes, 0, "COLETES")
+        item = item_for(avaliacoes, 0, "colete")
         self.assertIs(item.state, RelationalState.INCORRETO)
-        self.assertIsNotNone(item.track)
-        self.assertLess(item.evidence["placement_score_pct"], 75.0)
-        self.assertGreaterEqual(item.evidence["association_score_pct"], 45.0)
+        self.assertIsNotNone(item.detection)
+        self.assertLess(item.evidence["placement_score"], 0.75)
+        self.assertGreaterEqual(item.evidence["association_score"], 0.45)
 
     def test_pessoa_sem_nenhum_epi(self):
         avaliacoes = evaluate([PESSOA])
@@ -62,8 +63,8 @@ class RelationalStateTest(unittest.TestCase):
         self.assertEqual(
             estados,
             {
-                "CAPACETES": RelationalState.AUSENTE,
-                "COLETES": RelationalState.AUSENTE,
+                "capacete": RelationalState.AUSENTE,
+                "colete": RelationalState.AUSENTE,
             },
         )
 
@@ -77,36 +78,56 @@ class RelationalStateTest(unittest.TestCase):
 
 
 class ConfidenceTest(unittest.TestCase):
-    def test_track_previsto_reduz_confianca(self):
+    def test_confianca_da_deteccao_do_i1_escala_a_confianca(self):
         # política sem teto de confiança para que a razão seja exatamente 0.70
-        previsto_track = make_track(
-            10, "capacete", make_bbox(468, 884, 144, 150), state="predicted"
-        )
-        confirmado = item_for(
+        fraco = make_detection(10, "capacete", make_bbox(468, 884, 144, 150), confidence=0.70)
+        firme = item_for(
             evaluate([PESSOA, CAPACETE_OK, COLETE_OK], uncapped_policy()),
             0,
-            "CAPACETES",
+            "capacete",
         )
-        previsto = item_for(
-            evaluate([PESSOA, previsto_track, COLETE_OK], uncapped_policy()),
+        reduzido = item_for(
+            evaluate([PESSOA, fraco, COLETE_OK], uncapped_policy()),
             0,
-            "CAPACETES",
+            "capacete",
         )
-        self.assertEqual(previsto.evidence["penalty"], "predicted_track")
-        self.assertAlmostEqual(
-            previsto.confidence_pct,
-            round(confirmado.confidence_pct * 0.70, 2),
-            places=2,
-        )
-        # com o teto padrão, a confiança continua bem menor que a do confirmado
-        self.assertLess(previsto.confidence_pct, confirmado.confidence_pct)
+        self.assertEqual(reduzido.evidence["detection_confidence"], 0.70)
+        self.assertAlmostEqual(reduzido.confidence, firme.confidence * 0.70, places=6)
+
+    def test_ausencia_escala_com_a_confianca_da_pessoa(self):
+        pessoa = make_detection(1, "pessoa", PERSON_BOX, confidence=0.5)
+        item = item_for(evaluate([pessoa]), 0, "capacete")
+        self.assertAlmostEqual(item.confidence, 0.62 * 0.5, places=6)
 
     def test_teto_de_confianca(self):
-        item = item_for(evaluate([PESSOA, CAPACETE_OK, COLETE_OK]), 0, "COLETES")
-        self.assertLessEqual(item.confidence_pct, 95.0)
+        item = item_for(evaluate([PESSOA, CAPACETE_OK, COLETE_OK]), 0, "colete")
+        self.assertLessEqual(item.confidence, 0.95)
+
+
+class UncertainTest(unittest.TestCase):
+    def test_baixa_confianca_marca_uncertain(self):
+        fraco = make_detection(10, "capacete", make_bbox(468, 884, 144, 150), confidence=0.40)
+        avaliacoes = evaluate([PESSOA, fraco, COLETE_OK])
+        self.assertTrue(item_for(avaliacoes, 0, "capacete").uncertain)
+        self.assertFalse(item_for(avaliacoes, 0, "colete").uncertain)
+        self.assertTrue(avaliacoes[0].uncertain)
+        self.assertEqual(avaliacoes[0].uncertain_reasons, ())
+
+    def test_oclusao_severa_marca_todos_os_itens(self):
+        # segunda pessoa quase sobreposta à primeira
+        ocluida = make_detection(2, "pessoa", make_bbox(440, 300, 240, 700))
+        avaliacoes = evaluate([PESSOA, ocluida, CAPACETE_OK, COLETE_OK])
+        for avaliacao in avaliacoes:
+            self.assertEqual(avaliacao.uncertain_reasons, ("severe_occlusion",))
+            self.assertTrue(all(e.uncertain for e in avaliacao.equipment))
+
+    def test_pessoas_separadas_nao_sao_ocluidas(self):
+        outra = make_detection(2, "pessoa", make_bbox(1100, 300, 220, 680))
+        avaliacoes = evaluate([PESSOA, outra, CAPACETE_OK, COLETE_OK])
+        self.assertEqual(avaliacoes[0].uncertain_reasons, ())
 
     def test_evidencia_contem_posicao_normalizada(self):
-        item = item_for(evaluate([PESSOA, CAPACETE_OK, COLETE_OK]), 0, "CAPACETES")
+        item = item_for(evaluate([PESSOA, CAPACETE_OK, COLETE_OK]), 0, "capacete")
         centro = item.evidence["person_normalized_center"]
         self.assertAlmostEqual(centro["u"], 0.5, places=2)
         self.assertGreater(centro["v"], 0.8)  # cabeça fica no topo (origem inferior)
@@ -123,17 +144,17 @@ class PolicyDrivenClassTest(unittest.TestCase):
 
     def test_classe_opcional_nao_gera_ausente(self):
         def mutation(data):
-            data["equipment"][1]["required"] = False  # COLETES deixa de ser obrigatória
+            data["equipment"][1]["required"] = False  # colete deixa de ser obrigatória
 
-        # COLETES está presente, então deve ser retornado (como CORRETO)
+        # colete está presente, então deve ser retornado (como CORRETO)
         avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_OK], policy_from(mutation))
         classes = {e.canonical_class for e in avaliacoes[0].equipment}
-        self.assertEqual(classes, {"CAPACETES", "COLETES"})
+        self.assertEqual(classes, {"capacete", "colete"})
 
-        # COLETES ausente e opcional -> não deve gerar AUSENTE
+        # colete ausente e opcional -> não deve gerar AUSENTE
         avaliacoes = evaluate([PESSOA, CAPACETE_OK], policy_from(mutation))
         classes = {e.canonical_class for e in avaliacoes[0].equipment}
-        self.assertEqual(classes, {"CAPACETES"})
+        self.assertEqual(classes, {"capacete"})
 
     def test_classe_nova_reaproveita_zona_existente(self):
         def mutation(data):
@@ -165,7 +186,7 @@ class PolicyDrivenClassTest(unittest.TestCase):
                 }
             )
 
-        protetor_track = make_track(14, "protetor_auricular", make_bbox(500, 900, 40, 40))
+        protetor_track = make_detection(14, "protetor_auricular", make_bbox(500, 900, 40, 40))
         avaliacoes = evaluate([PESSOA, CAPACETE_OK, COLETE_OK, protetor_track], policy_from(mutation))
         protetor = item_for(avaliacoes, 0, "PROTETORES_AURICULARES")
         self.assertIs(protetor.state, RelationalState.CORRETO)

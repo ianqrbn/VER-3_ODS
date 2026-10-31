@@ -1,17 +1,41 @@
 {
   "policy_id": "default",
   "version": "1.0",
-  "person_classes": ["pessoa", "person", "pessoas", "safe worker", "unsafe worker", "worker -only hat-", "worker -only vest-"],
+  "person_classes": [
+    "pessoa",
+    "person",
+    "pessoas",
+    "safe worker",
+    "unsafe worker",
+    "worker -only hat-",
+    "worker -only vest-"
+  ],
+  "item_zones": {
+    "capacete": "HEAD",
+    "oculos": "HEAD",
+    "mascara": "HEAD",
+    "protetor_auricular": "HEAD",
+    "colete": "TORSO",
+    "luvas": "HANDS",
+    "bota": "FEET"
+  },
   "equipment": [
     {
-      "class": "CAPACETES",
-      "aliases": ["capacete", "capacetes", "CAPACETE", "CAPACETES", "helmet", "hardhat"],
+      "class": "capacete",
+      "aliases": [
+        "capacetes",
+        "helmet",
+        "hardhat"
+      ],
       "required": true,
       "zone": "HEAD"
     },
     {
-      "class": "COLETES",
-      "aliases": ["colete", "coletes", "COLETE", "COLETES", "vest"],
+      "class": "colete",
+      "aliases": [
+        "coletes",
+        "vest"
+      ],
       "required": true,
       "zone": "TORSO"
     }
@@ -29,12 +53,13 @@
   },
   "confidence": {
     "correct_threshold": 0.75,
-    "predicted_factor": 0.7,
-    "unknown_state_factor": 0.5,
     "absence_base": 0.62,
     "absence_max": 0.7,
     "absence_candidate_penalty": 0.85,
-    "max_confidence": 0.95
+    "max_confidence": 0.95,
+    "min_detection_confidence": 0.25,
+    "uncertain_below": 0.5,
+    "occlusion_overlap": 0.4
   },
   "calibration": {
     "max_reprojection_rms_cm": 5.0,

@@ -2,7 +2,7 @@
 Repositório em memória das calibrações recebidas do I3.
 
 O I9 não calcula homografia: ele consome a matriz publicada pelo I3, valida os
-indicadores de qualidade e mantém, por câmera, a versão válida mais recente.
+indicadores de qualidade e mantém, por câmera (`source_id`), a versão válida mais recente.
 """
 
 from __future__ import annotations
@@ -27,30 +27,30 @@ class CalibrationStore:
         """
         reason = self._validate(calibration)
         if reason is not None:
-            self._rejected[calibration.camera_id] = reason
+            self._rejected[calibration.source_id] = reason
             return False
 
-        atual = self._by_camera.get(calibration.camera_id)
+        atual = self._by_camera.get(calibration.source_id)
         if atual is None or atual.calibration_version == calibration.calibration_version:
-            self._by_camera[calibration.camera_id] = calibration
+            self._by_camera[calibration.source_id] = calibration
         else:
             # mantém a versão já aceita: a troca deve ser explícita pelo consumidor
-            self._rejected[calibration.camera_id] = (
+            self._rejected[calibration.source_id] = (
                 f"calibração {calibration.calibration_version!r} recebida com "
                 f"{atual.calibration_version!r} já ativa; reinicie o consumidor para trocar"
             )
         return True
 
-    def get(self, camera_id: str) -> Optional[Calibration]:
-        return self._by_camera.get(camera_id)
+    def get(self, source_id: str) -> Optional[Calibration]:
+        return self._by_camera.get(source_id)
 
-    def status(self, camera_id: str) -> CalibrationStatus:
-        calibration = self._by_camera.get(camera_id)
+    def status(self, source_id: str) -> CalibrationStatus:
+        calibration = self._by_camera.get(source_id)
         if calibration is None:
             return CalibrationStatus(
                 version=None,
-                status="rejected" if camera_id in self._rejected else "missing",
-                reason=self._rejected.get(camera_id),
+                status="rejected" if source_id in self._rejected else "missing",
+                reason=self._rejected.get(source_id),
             )
         return CalibrationStatus(version=calibration.calibration_version, status="valid")
 

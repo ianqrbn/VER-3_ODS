@@ -1,11 +1,13 @@
-# I9 · Verificador de EPI por pessoa
+# I9 · Inferência relacional pessoa–EPI
 
 Verificação **geométrica** (sem modelo de visão computacional) do uso de EPI por
-pessoa, a partir das bounding boxes e do rastreio recebidos do **I2**.
+pessoa, a partir das detecções do **I1** e da calibração do **I3**
+(arquitetura 6c).
 
 Para cada pessoa e para cada classe de EPI definida na política da aplicação, o
 componente emite um estado relacional — `CORRETO`, `INCORRETO` ou `AUSENTE` —
-com uma porcentagem de confiança e as demais informações recebidas do frame.
+com confiança e a sinalização `uncertain`, publicando `ods.i9.ppe_compliance`
+para o **S2** e o **A5**.
 
 O I9 é um verificador **especializado em pessoas**: a anatomia (cabeça, tronco,
 mãos) e sua geometria são conhecimento do motor. A aplicação configura apenas
@@ -16,81 +18,151 @@ usado.
 
 ```bash
 cd I9
-python3 main.py            # resumo legível dos 3 quadros simulados
+python3 main.py                                        # 3 quadros simulados (mock)
+python3 main.py --input examples/i1_detections.json --json   # mensagens reais do I1
+python3 main.py --input quadros.jsonl --calibration calib.jsonl
+python3 main.py --catalog examples/a5_ppe_catalog.json   # usa o PPE_CATALOG do A5
 python3 -m unittest discover -s tests -t .
 ```
 
-Sem dependências externas: apenas a biblioteca padrão do Python 3.10+.
+`--input` e `--calibration` aceitam um objeto JSON, uma lista JSON ou JSONL.
+Sem dependências externas: apenas a biblioteca padrão do Python 3.10+. O modo
+`--kafka` exige `confluent-kafka` (`requirements-kafka.txt`); os testes usam
+clientes falsos e não precisam dele.
 
 ## Fluxo
 
 ```text
-I2  ods.inferencia.rastreio ──┐
-                              ├─► I9Pipeline ─► PairingModule ─► RelationInferenceModule ─► ods.inferencia.relacional
-I3  ods.inferencia.calibracao ┘                     (associação)      (estado + confiança)
+I1  ods.i1.detections  ──┐
+                         ├─► I9Pipeline ─► PairingModule ─► RelationInferenceModule ─► ods.i9.ppe_compliance ─► S2, A5
+I3  ods.i3.calibration ──┘                   (associação)      (estado + confiança)
 ```
 
-* `I9Pipeline` (`src/core/pipeline.py`) orquestra um quadro por vez, sem estado
-  acumulado: as **regras temporais são responsabilidade do I2**.
+* `I9Pipeline` (`src/core/pipeline.py`) orquestra **um quadro estático** por
+  vez, sem estado acumulado: o **cruzamento temporal é do S2**, que casa a pessoa
+  inferida pelo I9 com o rastro do I2 pelo `detection_id` + chave do quadro
+  (`source_id`, `session_id`, `frame_index`).
 * `PairingModule` (`src/core/pairing.py`) associa EPIs a pessoas de forma
   **um-para-um** (EPIs são individuais).
-* `RelationInferenceModule` (`src/core/inference.py`) decide o estado relacional.
-* `CalibrationStore` (`src/core/calibration.py`) valida e guarda a homografia do I3.
+* `RelationInferenceModule` (`src/core/inference.py`) decide o estado relacional
+  e o `uncertain`.
+* `CalibrationStore` (`src/core/calibration.py`) valida e guarda a calibração do
+  I3 por `source_id`.
 * `body_zones.py` (`src/domain/body_zones.py`) guarda a geometria do corpo humano.
 * A política fica **fora do código**, em `config/policy.json`.
 
+### Adaptadores
+
+| Porta | Mock | Mensagens reais (`src/adapters/message_adapters.py`) |
+|---|---|---|
+| ingestão (I1) | `MockIngestionAdapter` | `MessageIngestionAdapter(mensagens)` |
+| calibração (I3) | `MockCalibrationAdapter` | `MessageCalibrationAdapter` (`on_message` como callback) |
+| saída | `MockConsoleOutputAdapter` | `MessagePublisherAdapter(send)` |
+
+No modo `--kafka`, as mesmas portas são atendidas por `KafkaIngestionAdapter`,
+`KafkaCalibrationAdapter` e `KafkaPublisherAdapter` (ver seção Kafka).
+
+Os adaptadores de mensagem não dependem do transporte: o consumidor do B3
+(Kafka) entrega o corpo de cada mensagem (`dict`, `str` ou `bytes` JSON) e o
+produtor expõe `send(topic, key, value)`. A chave publicada é o `source_id`, para
+preservar a ordem dos quadros de cada câmera. Mensagens inválidas são
+registradas em `rejected` sem interromper o consumo.
+
+## Kafka (barramento B3)
+
+```bash
+pip install -r requirements-kafka.txt        # confluent-kafka (só para o modo Kafka)
+docker compose up -d                         # broker local em localhost:9092 + tópicos
+python3 main.py --kafka                      # serviço contínuo do I9
+
+# em outro terminal
+python3 tools/kafka_cli.py send examples/i3_calibration.json
+python3 tools/kafka_cli.py send examples/i1_detections.json
+python3 tools/kafka_cli.py tail ods.i9.ppe_compliance
+```
+
+| Tópico | Papel | Chave | Observação |
+|---|---|---|---|
+| `ods.i1.detections` | consumido | `source_id` | grupo `ods-i9`, commit manual |
+| `ods.i3.calibration` | consumido | `source_id` | **compactado**; relido desde o início a cada partida |
+| `ods.artifact.published` | consumido | `artifact_id` | **compactado**; só `PPE_CATALOG` do A5; relido a cada partida |
+| `ods.i9.ppe_compliance` | publicado | `source_id` | `acks=all`, produtor idempotente |
+| `ods.i9.dlq` | publicado | original | mensagens inválidas + headers `error`, `source_*` |
+
+Garantias (`src/adapters/kafka_adapters.py`):
+
+* **at-least-once** — o offset do quadro do I1 só é confirmado depois que o
+  broker confirma a entrega da saída. Se o I9 cair no meio, o quadro é
+  reprocessado; o resultado é o mesmo e o S2 descarta a duplicata pela chave do
+  quadro. Falha de entrega encerra o serviço **sem** confirmar o offset;
+* mensagem inválida vai para o DLQ, tem o offset confirmado e não trava o consumo;
+* erro transitório do consumidor é registrado; erro fatal encerra o serviço;
+* `SIGINT`/`SIGTERM` encerram o laço de forma limpa;
+* chave = `source_id`: os quadros de uma câmera ficam na mesma partição, em ordem.
+
+Configuração por variáveis de ambiente (defaults **provisórios**, a confirmar com o B3):
+
+| Variável | Padrão |
+|---|---|
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` |
+| `I9_KAFKA_GROUP_ID` | `ods-i9` |
+| `I9_TOPIC_DETECTIONS` / `I9_TOPIC_CALIBRATION` / `I9_TOPIC_COMPLIANCE` | nomes dos schemas |
+| `I9_TOPIC_DLQ` | `ods.i9.dlq` (vazio desliga) |
+| `I9_TOPIC_ARTIFACTS` | `ods.artifact.published` |
+| `A5_REGISTRY_BASE_URL` | vazio (obrigatório para `uri` `registry://`) |
+| `I9_CATALOG_OWNER` | `A5` (vazio aceita qualquer dono) |
+| `I9_AUTO_OFFSET_RESET` | `latest` (sem offset salvo, começa do quadro atual) |
+| `I9_DELIVERY_TIMEOUT_S` / `I9_POLL_TIMEOUT_S` / `I9_CALIBRATION_WARMUP_S` | `10` / `1` / `3` |
+| `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD`, `KAFKA_SSL_CA_LOCATION` | `PLAINTEXT` / vazio |
+
 ## Contratos
 
-### Entrada — rastreio (I2)
-
-Origem da imagem no canto **inferior esquerdo** e `x_max` / `y_max` **exclusivos**,
-no mesmo espaço de pixels de `u_px` / `v_px`.
+### Entrada — detecções (I1)
 
 ```json
 {
   "message_type": "event",
-  "schema": "ods.inferencia.rastreio",
+  "message_id": "a8f5f167-99b4-4d2b-8b1e-6c9a2e4f1d3b",
+  "schema": "ods.i1.detections",
   "schema_version": "1.0",
-  "producer": "I2",
-  "published_at": "2026-09-23T14:05:12.402Z",
+  "producer": "I1",
+  "published_at": "2026-10-18T22:01:10.145Z",
+  "captured_at": "2026-10-18T22:01:10.110Z",
+  "source_id": "cam0",
+  "session_id": "9c2a1f3e-4d5b-4c6a-9e8f-0a1b2c3d4e5f",
+  "sequence": 42,
+  "artifact_version": "app-epi-1.0.0",
   "payload": {
-    "camera_id": "CAM-01",
-    "session_id": "sess-2026-09-23-a",
-    "captured_at": "2026-09-23T14:05:12.400Z",
-    "frame": 12345,
-    "frame_width": 1920,
-    "frame_height": 1080,
-    "tracks": [
-      {
-        "track_id": 42,
-        "class": "pessoa",
-        "state": "confirmed",
-        "u_px": 540.0,
-        "v_px": 640.0,
-        "predicted": false,
-        "bbox": { "x_min": 412.0, "y_min": 268.0, "x_max": 668.0, "y_max": 1012.0 }
-      }
+    "frame_index": 42,
+    "image_width": 1280,
+    "image_height": 720,
+    "detections": [
+      { "detection_id": 0, "class": "pessoa",   "confidence": 0.9412, "bbox": [412, 180, 598, 702] },
+      { "detection_id": 1, "class": "capacete", "confidence": 0.9604, "bbox": [450, 182, 540, 255] },
+      { "detection_id": 2, "class": "colete",   "confidence": 0.9318, "bbox": [425, 290, 585, 510] }
     ]
   }
 }
 ```
 
-`state` aceita `confirmed`, `predicted` e `lost`. `frame_width`, `frame_height` e
-`frame` são opcionais. Campos adicionais de cada track são preservados e
-repassados sem alteração na saída.
+* `bbox` é `[x1, y1, x2, y2]` em pixels com origem no canto **superior**
+  esquerdo. No parsing ela é convertida para a convenção interna do motor
+  (origem **inferior**, usando `image_height`), para que a cabeça fique em `v` alto.
+* Obrigatórios: `schema`, `source_id`, `payload.image_width`,
+  `payload.image_height` e, por detecção, `detection_id`, `class`, `confidence`
+  (0–1) e `bbox`. `detection_id` duplicado no quadro invalida a mensagem.
 
 ### Entrada — calibração (I3)
 
 ```json
 {
   "message_type": "event",
-  "schema": "ods.inferencia.calibracao",
+  "schema": "ods.i3.calibration",
   "schema_version": "1.0",
   "producer": "I3",
-  "published_at": "2026-09-23T13:58:00.000Z",
+  "source_id": "cam0",
   "payload": {
-    "camera_id": "CAM-01",
-    "calibration_version": "cam-01-v3",
+    "calibration_version": "cam0-v3",
     "valid_from": "2026-09-23T13:58:00.000Z",
     "homography": [[0.004, -0.0002, 0.85], [0.0001, -0.0042, 1.15], [-0.0000009, 0.0000021, 1.0]],
     "reference_frame": { "space_id": "obra-civil", "origin": "0,0", "axes": "x_direita,y_frente", "unit": "m" },
@@ -100,64 +172,75 @@ repassados sem alteração na saída.
 }
 ```
 
-A matriz é recebida, validada e armazenada por câmera. Ela é usada como **corte
-de alcance** e como informação de auditoria, não como critério de posição: como
-a homografia projeta o chão, um capacete na cabeça cai longe do ponto do tronco.
+A calibração é indexada pelo `source_id` do envelope (com `payload.source_id`
+ou `payload.camera_id` como alternativa). `homography` é **opcional**: sem ela o
+I9 funciona normalmente, apenas sem o corte métrico de alcance. Demais campos
+(parâmetros intrínsecos, distorção) são preservados. A homografia é usada como
+**corte de alcance** e como auditoria, não como critério de posição.
 
-### Saída — evento relacional (I9)
+### Saída — conformidade de EPI (I9, envelope EV-SINAL)
 
 ```json
 {
   "message_type": "event",
-  "schema": "ods.inferencia.relacional",
+  "message_id": "99fbd52f-3ea3-4ea9-bd02-6cad4d567207",
+  "schema": "ods.i9.ppe_compliance",
   "schema_version": "1.0",
   "producer": "I9",
-  "published_at": "2026-09-23T14:05:12.450Z",
+  "published_at": "2026-10-31T14:17:02.294Z",
+  "captured_at": "2026-10-18T22:01:10.110Z",
+  "source_id": "cam0",
+  "session_id": "9c2a1f3e-4d5b-4c6a-9e8f-0a1b2c3d4e5f",
+  "sequence": 42,
+  "artifact_version": "i9-geom-default-1.0",
   "payload": {
-    "camera_id": "CAM-01",
-    "session_id": "sess-2026-09-23-a",
-    "frame": 12345,
-    "captured_at": "2026-09-23T14:05:12.400Z",
-    "frame_width": 1920,
-    "frame_height": 1080,
-    "calibration_version": "cam-01-v3",
-    "calibration_status": "valid",
-    "policy_id": "default",
-    "policy_version": "1.0",
-    "relations": [
+    "frame_index": 42,
+    "image_width": 1280,
+    "image_height": 720,
+    "source_message_id": "a8f5f167-99b4-4d2b-8b1e-6c9a2e4f1d3b",
+    "catalog_version": "ppe-a5-3",
+    "calibration_version": null,
+    "calibration_status": "missing",
+    "uncertain": false,
+    "persons": [
       {
-        "person": { "track_id": 42, "class": "pessoa", "...": "track original do I2" },
+        "detection_id": 0,
+        "class": "pessoa",
+        "confidence": 0.9412,
+        "bbox": [412, 180, 598, 702],
+        "uncertain": false,
+        "uncertain_reasons": [],
         "equipment": [
           {
-            "class": "CAPACETES",
-            "required": true,
-            "relational_state": "CORRETO",
-            "confidence_pct": 95.0,
-            "detection": { "track_id": 101, "...": "track original do I2" },
+            "equipment_item": "capacete",
+            "state": "CORRETO",
+            "confidence": 0.8148,
+            "uncertain": false,
+            "detection_id": 1,
             "evidence": {
-              "association_score_pct": 100.0,
-              "placement_score_pct": 97.04,
-              "person_normalized_center": { "u": 0.5, "v": 0.9288 },
-              "expected_zone": "HEAD",
-              "ground_distance_m": 1.338
+              "association_score": 0.8814,
+              "placement_score": 0.9625,
+              "detection_confidence": 0.9604,
+              "person_normalized_center": { "u": 0.4462, "v": 0.9262 },
+              "expected_zone": "HEAD"
             }
           },
           {
-            "class": "LUVAS",
-            "required": true,
-            "relational_state": "AUSENTE",
-            "confidence_pct": 62.0,
-            "detection": null,
-            "evidence": { "reason": "no_candidate_in_person_region", "zone": "HANDS" }
+            "equipment_item": "colete",
+            "state": "AUSENTE",
+            "confidence": 0.5835,
+            "uncertain": false,
+            "detection_id": null,
+            "evidence": { "reason": "no_candidate_in_person_region", "zone": "TORSO" }
           }
         ]
       }
     ],
     "unassociated_equipment": [
-      { "class": "CAPACETES", "track": { "track_id": 301 }, "reason": "below_association_threshold", "best_association_score_pct": 0.01 }
+      { "equipment_item": "capacete", "detection_id": 6, "reason": "below_association_threshold", "best_association_score": 0.5963 }
     ],
-    "ignored_tracks": [
-      { "track": { "track_id": 202 }, "reason": "track_state_lost" }
+    "ignored_detections": [
+      { "detection_id": 5, "class": "colete", "reason": "low_detection_confidence" }
     ]
   }
 }
@@ -165,31 +248,66 @@ a homografia projeta o chão, um capacete na cabeça cai longe do ponto do tronc
 
 Regras do contrato de saída:
 
-* um evento por quadro, mesmo sem pessoas (`relations: []`);
-* `relational_state` evita colisão com o `state` do rastreador;
-* `AUSENTE` sempre traz `detection: null`;
-* **todo track de entrada aparece exatamente uma vez**: em `relations` (pessoa ou
-  `detection`), em `unassociated_equipment` ou em `ignored_tracks`;
-* `confidence_pct` é um score geométrico do quadro atual, não uma probabilidade
-  calibrada — deve ser ajustado com dados anotados antes de virar garantia.
+* um evento por quadro, mesmo sem pessoas (`persons: []`);
+* `captured_at`, `source_id`, `session_id` e `sequence` são os do quadro do I1;
+  `source_message_id` aponta para a mensagem de origem (rastreabilidade);
+* `catalog_version` é o `artifact_version` do PPE_CATALOG em uso (`null` com a
+  lista local);
+* `artifact_version` é a versão do modelo do I9: `artifact_version` da política
+  ou, por padrão, `i9-geom-<policy_id>-<version>`;
+* `AUSENTE` sempre traz `detection_id: null`;
+* **toda detecção de entrada aparece exatamente uma vez**: em `persons` (pessoa
+  ou `detection_id` de um item), em `unassociated_equipment` ou em
+  `ignored_detections`;
+* `uncertain` existe por item, por pessoa (qualquer item incerto ou oclusão
+  severa, com o motivo em `uncertain_reasons`) e no quadro;
+* `confidence` (0–1) é um score geométrico do quadro atual, não uma
+  probabilidade calibrada.
 
-## Política de EPI (`config/policy.json`)
+## Catálogo de EPI (PPE_CATALOG do A5)
 
-As classes variam por aplicação (por exemplo, o capacete pode não ser exigido em
-determinados contextos). A configuração é enxuta de propósito: **qual** EPI, **em
-qual zona** e se é **obrigatório**.
+A lista de EPIs vem do A5. O I9 recebe o anúncio em `ods.artifact.published`
+(`kind: PPE_CATALOG`), baixa o conteúdo pela `uri` e confere o `hash_sha256`
+(`src/adapters/catalog_adapters.py`):
+
+* `registry://a5/<artifact_id>/<n>` → `GET {A5_REGISTRY_BASE_URL}/registro/<artifact_id>/<n>`;
+  `http(s)://` e `file://` são lidos diretamente;
+* o hash é conferido sobre os bytes recebidos ou, se não bater, sobre o JSON
+  canônico (chaves ordenadas, sem espaços); hash divergente rejeita o catálogo;
+* anúncios de outros tipos ou de outro dono (`I9_CATALOG_OWNER`, padrão `A5`)
+  são ignorados; catálogo inválido ou registro fora do ar mantém a lista em uso.
+
+Como cada campo é usado:
+
+| Campo do A5 | Uso no I9 |
+|---|---|
+| `items[].equipment_item` | classe canônica; sai **sem alteração** em `equipment_item` |
+| `items[].class_aliases` | classes do I1 que correspondem ao item (comparação sem caixa) |
+| `items[].name` | não usado (exibição é do A5) |
+| `required[].items` | a **união** de todas as zonas é avaliada (inclusive `AUSENTE`); itens fora da união só aparecem quando detectados |
+| `required[].zone_id` | não usado: decidir a zona da pessoa e o que é exigido nela é do **S2** |
+
+A zona do corpo de cada item (o `body_part` do 6c) é conhecimento anatômico do
+I9 e fica em `item_zones` de `config/policy.json`. Item do catálogo sem zona
+conhecida não é avaliado e é registrado no log.
 
 ```json
-{
-  "class": "CAPACETES",
-  "aliases": ["capacete", "capacetes", "CAPACETE", "helmet"],
-  "required": true,
-  "zone": "HEAD"
+"item_zones": {
+  "capacete": "HEAD", "oculos": "HEAD", "mascara": "HEAD", "protetor_auricular": "HEAD",
+  "colete": "TORSO", "luvas": "HANDS", "bota": "FEET"
 }
 ```
 
+Sem catálogo (antes do primeiro anúncio, nos mocks e na calibração com dataset)
+vale a lista local `equipment`:
+
+```json
+{ "class": "capacete", "aliases": ["capacetes", "helmet", "hardhat"], "required": true, "zone": "HEAD" }
+```
+
 Os blocos `association`, `confidence` e `calibration` são opcionais: todos os
-parâmetros têm default no motor e servem apenas para ajuste fino.
+parâmetros têm default no motor e servem apenas para ajuste fino. Eles continuam
+valendo quando o catálogo do A5 substitui a lista local.
 
 ### Zonas do corpo
 
@@ -208,15 +326,18 @@ Como a origem é inferior, a cabeça fica em `v` alto:
 | `HEAD` | cabeça | 0.28 – 0.72 | 0.72 – 1.10 | 0.18 / 0.18 |
 | `TORSO` | tronco | 0.20 – 0.80 | 0.38 – 0.74 | 0.20 / 0.16 |
 | `HANDS` | mãos/quadro | 0.02 – 0.98 | 0.10 – 0.55 | 0.15 / 0.18 |
+| `FEET` | pés | 0.05 – 0.95 | −0.06 – 0.14 | 0.15 / 0.10 |
 
 `HEAD` passa de `v = 1.0` porque um capacete legitamente ultrapassa o topo da
-bounding box da pessoa. Uma zona desconhecida é **erro de configuração**: o
+bounding box da pessoa. `FEET` é uma heurística inicial, sem dados anotados de
+botas para calibrar. Uma zona desconhecida é **erro de configuração**: o
 carregamento falha e a mensagem lista as zonas disponíveis.
 
 ## Regras
 
-1. **Classificação dos tracks** — `lost` e classes fora da política vão para
-   `ignored_tracks`; os demais são separados em pessoas e EPIs.
+1. **Classificação das detecções** — confiança abaixo de
+   `min_detection_confidence` (0.25) e classes fora da política vão para
+   `ignored_detections`; as demais são separadas em pessoas e EPIs.
 2. **Associação (score de 0 a 1)** — combinação ponderada de:
    * contenção/IoU entre a bbox do EPI e a da pessoa (com pequena expansão);
    * proximidade horizontal e faixa vertical em coordenadas normalizadas;
@@ -235,9 +356,13 @@ carregamento falha e a mensagem lista as zonas disponíveis.
    * `INCORRETO`: `associação × (1 − posicionamento)`
    * `AUSENTE`: `absence_base`, reduzido quando existe um EPI da mesma classe sem
      dono, e limitado por `absence_max`
-   * multiplicada por `predicted_factor` (0.70) para tracks `predicted` e
-     `unknown_state_factor` (0.50) para estado desconhecido;
-   * limitada por `max_confidence` (0.95), pois ainda não há calibração estatística.
+   * limitada por `max_confidence` (0.95), pois ainda não há calibração estatística;
+   * multiplicada pela `confidence` da detecção do I1 (do EPI; da pessoa no
+     caso de `AUSENTE`).
+7. **Incerteza** — o item sai `uncertain: true` quando a confiança final fica
+   abaixo de `uncertain_below` (0.50). Quando outra pessoa cobre pelo menos
+   `occlusion_overlap` (40%) da caixa da pessoa, todos os itens dela saem
+   incertos com `uncertain_reasons: ["severe_occlusion"]`.
 
 Quando o EPI está integralmente contido na pessoa, a associação satura em 100% e
 a confiança passa a ser determinada essencialmente pelo posicionamento — o que é
@@ -247,17 +372,14 @@ o comportamento esperado para um enquadramento limpo.
 
 | Mudança | Onde | Exige deploy? |
 |---|---|---|
-| Nova classe de EPI | `config/policy.json` | não |
-| Tornar classe opcional | `config/policy.json` (`required: false`) | não |
-| Novo alias de detecção | `config/policy.json` (`aliases`) | não |
+| Novo EPI / alias / obrigatoriedade | cadastro do A5 (`PPE_CATALOG`) | não |
+| Zona do corpo de um EPI novo | `config/policy.json` (`item_zones`) | não |
+| Lista local (sem A5) | `config/policy.json` (`equipment`) | não |
 | Ajuste fino de limiar | `config/policy.json` (`association` / `confidence`) | não |
 | **Nova zona do corpo** | `src/domain/body_zones.py` + teste | **sim** |
 
-Exemplo de classe nova sem tocar em código:
-
-```json
-{ "class": "PROTETORES_AURICULARES", "aliases": ["protetor_auricular"], "required": true, "zone": "HEAD" }
-```
+Exemplo: o A5 cadastra `cinto` → basta acrescentar `"cinto": "TORSO"` em
+`item_zones`; até isso acontecer, o item é ignorado com aviso no log.
 
 ## Limitações conhecidas
 
@@ -266,7 +388,7 @@ Exemplo de classe nova sem tocar em código:
   mãos, protetor auricular nas duas orelhas) ficam representadas por uma região
   única e precisam de refinamento.
 * `AUSENTE` não distingue oclusão de ausência real — por isso a confiança é
-  limitada e o I2 deve consolidar o estado pela contagem de quadros.
+  limitada e o S2 deve consolidar o estado ao longo dos quadros.
 * Distinguir uso real de coincidência geométrica pode exigir keypoints, pose,
   segmentação ou um modelo, que pode ser plugado no lugar de
   `RelationInferenceModule` sem alterar o contrato de saída.

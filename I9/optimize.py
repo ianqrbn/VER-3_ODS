@@ -145,12 +145,13 @@ def main() -> None:
         },
         "confidence": {
             "correct_threshold": policy_optimized.confidence.correct_threshold,
-            "predicted_factor": policy_optimized.confidence.predicted_factor,
-            "unknown_state_factor": policy_optimized.confidence.unknown_state_factor,
             "absence_base": policy_optimized.confidence.absence_base,
             "absence_max": policy_optimized.confidence.absence_max,
             "absence_candidate_penalty": policy_optimized.confidence.absence_candidate_penalty,
             "max_confidence": policy_optimized.confidence.max_confidence,
+            "min_detection_confidence": policy_optimized.confidence.min_detection_confidence,
+            "uncertain_below": policy_optimized.confidence.uncertain_below,
+            "occlusion_overlap": policy_optimized.confidence.occlusion_overlap,
         },
         "calibration": {
             "max_reprojection_rms_cm": policy_optimized.calibration.max_reprojection_rms_cm,
@@ -200,23 +201,23 @@ def main() -> None:
     inference = RelationInferenceModule(policy=policy_optimized)
     predictions_eval = []
     for frame in dataset_full:
-        tracking_frame = frame.to_tracking_frame()
-        pairing_result = pairing.pair(tracking_frame)
+        detection_frame = frame.to_detection_frame()
+        pairing_result = pairing.pair(detection_frame)
         evaluations = inference.infer(pairing_result)
-        from src.domain.models import RelationalEvent
-        event = RelationalEvent(
-            camera_id=tracking_frame.camera_id,
-            session_id=tracking_frame.session_id,
-            frame=tracking_frame.frame,
-            captured_at=tracking_frame.captured_at,
-            frame_width=tracking_frame.frame_width,
-            frame_height=tracking_frame.frame_height,
-            calibration=None,
-            policy_id=policy_optimized.policy_id,
-            policy_version=policy_optimized.version,
+        from src.domain.models import CalibrationStatus, ComplianceEvent
+        event = ComplianceEvent(
+            source_id=detection_frame.source_id,
+            session_id=detection_frame.session_id,
+            captured_at=detection_frame.captured_at,
+            sequence=detection_frame.sequence,
+            frame_index=detection_frame.frame_index,
+            image_width=detection_frame.image_width,
+            image_height=detection_frame.image_height,
+            artifact_version=policy_optimized.artifact_version,
+            calibration=CalibrationStatus(),
             relations=tuple(evaluations),
             unassociated_equipment=tuple(pairing_result.unassociated_equipment),
-            ignored_tracks=tuple(pairing_result.ignored_tracks),
+            ignored_detections=tuple(pairing_result.ignored_detections),
         )
         predictions_eval.append(event)
     

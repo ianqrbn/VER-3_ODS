@@ -12,29 +12,23 @@
   ],
   "equipment": [
     {
-      "class": "CAPACETES",
+      "class": "capacete",
       "zone": "HEAD",
       "required": true,
       "min_association": 0.45,
       "aliases": [
-        "capacete",
         "capacetes",
-        "CAPACETE",
-        "CAPACETES",
         "helmet",
         "hardhat"
       ]
     },
     {
-      "class": "COLETES",
+      "class": "colete",
       "zone": "TORSO",
       "required": true,
       "min_association": 0.45,
       "aliases": [
-        "colete",
         "coletes",
-        "COLETE",
-        "COLETES",
         "vest"
       ]
     }
@@ -52,8 +46,6 @@
   },
   "confidence": {
     "correct_threshold": 0.7,
-    "predicted_factor": 0.7,
-    "unknown_state_factor": 0.5,
     "absence_base": 0.55,
     "absence_max": 0.7,
     "absence_candidate_penalty": 0.85,

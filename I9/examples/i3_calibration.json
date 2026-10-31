@@ -1,0 +1,17 @@
+{
+  "message_type": "event",
+  "message_id": "5b0e7c2a-1f4d-4e8a-9c3b-2d6f8a1e4b7c",
+  "schema": "ods.i3.calibration",
+  "schema_version": "1.0",
+  "producer": "I3",
+  "published_at": "2026-10-18T21:58:00.000Z",
+  "source_id": "cam0",
+  "payload": {
+    "calibration_version": "cam0-v1",
+    "valid_from": "2026-10-18T21:58:00.000Z",
+    "homography": [[0.004, -0.0002, 0.85], [0.0001, -0.0042, 1.15], [-0.0000009, 0.0000021, 1.0]],
+    "reference_frame": { "space_id": "obra-civil", "origin": "0,0", "axes": "x_direita,y_frente", "unit": "m" },
+    "reprojection_rms_cm": 1.8,
+    "holdout_points": 6
+  }
+}

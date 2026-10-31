@@ -1,0 +1,3 @@
+# Necessário apenas para `python3 main.py --kafka` e tools/kafka_cli.py.
+# O restante do I9 (pipeline, testes, calibração PSO) usa só a biblioteca padrão.
+confluent-kafka==2.16.1

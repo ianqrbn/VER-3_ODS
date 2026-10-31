@@ -16,7 +16,7 @@ Como `v` cresce para cima, a cabeça fica próxima de `v = 1` e o quadril de `v 
 O limite superior pode passar de 1.0 porque um capacete legitimamente ultrapassa o
 topo da bounding box da pessoa.
 
-Para acrescentar uma zona (por exemplo `EARS`, `FEET` ou `WAIST`):
+Para acrescentar uma zona (por exemplo `EARS` ou `WAIST`):
 
 1. adicione a constante em `BodyZone`;
 2. registre a geometria em `ZONAS`;
@@ -36,6 +36,7 @@ class BodyZone(str, Enum):
     HEAD = "HEAD"
     TORSO = "TORSO"
     HANDS = "HANDS"
+    FEET = "FEET"
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,10 @@ ZONAS: Dict[BodyZone, ZoneGeometry] = {
     ),
     BodyZone.HANDS: ZoneGeometry(
         u_min=0.02, u_max=0.98, v_min=0.10, v_max=0.55, tolerance_u=0.15, tolerance_v=0.18
+    ),
+    # heurística inicial (sem dados anotados de botas): base da caixa da pessoa
+    BodyZone.FEET: ZoneGeometry(
+        u_min=0.05, u_max=0.95, v_min=-0.06, v_max=0.14, tolerance_u=0.15, tolerance_v=0.10
     ),
 }
 

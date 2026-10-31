@@ -24,7 +24,7 @@ def minimal(**overrides):
         "version": "1.0",
         "equipment": [
             {
-                "class": "CAPACETES",
+                "class": "capacete",
                 "aliases": ["capacete"],
                 "required": True,
                 "zone": "HEAD",
@@ -39,8 +39,8 @@ class PolicyLoadingTest(unittest.TestCase):
     def test_politica_padrao_do_projeto(self):
         policy = default_policy()
         self.assertEqual(policy.policy_id, "default")
-        self.assertEqual(policy.class_order, ("CAPACETES", "COLETES"))
-        self.assertEqual(policy.required_classes(), ("CAPACETES", "COLETES"))
+        self.assertEqual(policy.class_order, ("capacete", "colete"))
+        self.assertEqual(policy.required_classes(), ("capacete", "colete"))
 
     def test_zonas_associadas_as_classes(self):
         policy = default_policy()
@@ -50,14 +50,14 @@ class PolicyLoadingTest(unittest.TestCase):
 
     def test_geometria_vem_do_motor(self):
         policy = default_policy()
-        regra = policy.rules["CAPACETES"]
+        regra = policy.rules["capacete"]
         self.assertEqual(regra_center(regra), (0.5, 0.91))
         self.assertEqual(regra_tolerance(regra), (0.18, 0.18))
 
     def test_alias_case_insensitive(self):
         policy = default_policy()
         for bruto in ("capacete", "CAPACETE", "Capacete", "capacetes", "helmet"):
-            self.assertEqual(policy.canonical_for(bruto), "CAPACETES")
+            self.assertEqual(policy.canonical_for(bruto), "capacete")
         self.assertIsNone(policy.canonical_for("protetor_auricular"))
 
     def test_deteccao_de_pessoa_e_classe_desconhecida(self):
@@ -71,13 +71,13 @@ class PolicyLoadingTest(unittest.TestCase):
 
     def test_min_association_tem_default_do_motor(self):
         policy = default_policy()
-        self.assertEqual(policy.rules["CAPACETES"].min_association, 0.45)
+        self.assertEqual(policy.rules["capacete"].min_association, 0.45)
 
     def test_classe_opcional(self):
         data = minimal()
         data["equipment"][0]["required"] = False
         policy = EquipmentPolicy.from_dict(data)
-        self.assertFalse(policy.rules["CAPACETES"].required)
+        self.assertFalse(policy.rules["capacete"].required)
         self.assertEqual(policy.required_classes(), ())
 
 
@@ -91,7 +91,7 @@ class PolicyValidationTest(unittest.TestCase):
     def test_alias_ambiguo(self):
         data = minimal()
         data["equipment"].append(
-            {"class": "COLETES", "aliases": ["capacete"], "zone": "TORSO"}
+            {"class": "colete", "aliases": ["capacete"], "zone": "TORSO"}
         )
         with self.assertRaisesRegex(ValueError, "ambíguo"):
             EquipmentPolicy.from_dict(data)

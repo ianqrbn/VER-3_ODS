@@ -1,0 +1,16 @@
+{
+  "message_type": "event",
+  "schema": "ods.artifact.published",
+  "schema_version": "1.0",
+  "producer": "A5",
+  "payload": {
+    "artifact_id": "ppe-a5",
+    "artifact_version": "ppe-a5-3",
+    "kind": "PPE_CATALOG",
+    "owner": "A5",
+    "uri": "registry://a5/ppe-a5/3",
+    "hash_sha256": "35591dd1aa1d14fd7b0742dda1a87082b86324583e21da65375bcb3e38fd42e9",
+    "valid_from": "2026-10-31T14:39:40.958087Z",
+    "schema_version": "1.0"
+  }
+}

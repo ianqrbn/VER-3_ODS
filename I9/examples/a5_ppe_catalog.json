@@ -1,0 +1,15 @@
+{
+  "items": [
+    { "equipment_item": "bota", "name": "Bota de seguranca", "class_aliases": ["bota", "boot", "boots"] },
+    { "equipment_item": "capacete", "name": "Capacete", "class_aliases": ["capacete", "helmet", "hard hat"] },
+    { "equipment_item": "colete", "name": "Colete refletivo", "class_aliases": ["colete", "vest", "safety vest"] },
+    { "equipment_item": "luvas", "name": "Luvas", "class_aliases": ["luva", "luvas", "glove", "gloves"] },
+    { "equipment_item": "mascara", "name": "Mascara", "class_aliases": ["mascara", "mask"] },
+    { "equipment_item": "oculos", "name": "Oculos de protecao", "class_aliases": ["oculos", "glasses", "goggles"] },
+    { "equipment_item": "protetor_auricular", "name": "Protetor auricular", "class_aliases": ["protetor auricular", "earmuffs"] }
+  ],
+  "required": [
+    { "zone_id": "galpao-solda", "items": ["capacete", "luvas", "oculos"] },
+    { "zone_id": "zona-producao-1", "items": ["capacete", "colete"] }
+  ]
+}

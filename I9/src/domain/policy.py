@@ -6,20 +6,55 @@ A geometria de cada zona não vive aqui: é conhecimento de domínio do verifica
 está em `src/domain/body_zones.py`. A configuração carrega apenas a referência,
 por exemplo:
 
-    { "class": "CAPACETES", "zone": "HEAD", "required": true, "aliases": [...] }
+    { "class": "capacete", "zone": "HEAD", "required": true, "aliases": [...] }
 
 Os parâmetros numéricos de associação e de confiança continuam disponíveis para
 ajuste fino, mas todos têm default no motor e são opcionais.
+
+Em produção, a lista de EPIs vem do `PPE_CATALOG` do A5 (`with_catalog`): o
+`equipment_item` do A5 vira a classe canônica, `class_aliases` vira os aliases e
+a zona do corpo sai de `item_zones` desta configuração. A lista `equipment` local
+é o catálogo padrão, usado antes de o A5 publicar e na calibração com datasets.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from src.domain.body_zones import BodyZone, ZoneGeometry, get_zone, resolve_zone
+
+if TYPE_CHECKING:
+    from src.domain.catalog import PpeCatalog
+
+DEFAULT_MIN_ASSOCIATION = 0.45
+
+
+def _index_rules(
+    rules_iter: Iterable["ZoneRule"], person_classes: Tuple[str, ...], context: str
+) -> Tuple[Dict[str, "ZoneRule"], Tuple[str, ...], Dict[str, str]]:
+    """Indexa as regras por classe canônica e monta o mapa de aliases, validando conflitos."""
+    rules: Dict[str, ZoneRule] = {}
+    class_order: list = []
+    alias_map: Dict[str, str] = {}
+
+    for rule in rules_iter:
+        if rule.canonical_class in rules:
+            raise ValueError(f"{context}: classe duplicada {rule.canonical_class!r}")
+        rules[rule.canonical_class] = rule
+        class_order.append(rule.canonical_class)
+        for alias in (rule.canonical_class, *rule.aliases):
+            key = alias.strip().lower()
+            if key in alias_map and alias_map[key] != rule.canonical_class:
+                raise ValueError(f"{context}: alias ambíguo {alias!r}")
+            alias_map[key] = rule.canonical_class
+
+    for person_class in person_classes:
+        if person_class in alias_map:
+            raise ValueError(f"{context}: {person_class!r} é pessoa e não pode ser classe de EPI")
+    return rules, tuple(class_order), alias_map
 
 
 def _ratio(data: Mapping[str, Any], key: str, context: str, default: float) -> float:
@@ -118,26 +153,34 @@ class AssociationSettings:
 
 @dataclass(frozen=True)
 class ConfidenceSettings:
-    """Parâmetros de pontuação do estado relacional (heurísticos, ajustáveis)."""
+    """Parâmetros de pontuação do estado relacional (heurísticos, ajustáveis).
+
+    * `min_detection_confidence`: detecções do I1 abaixo disso são descartadas;
+    * `uncertain_below`: item com confiança final abaixo disso sai `uncertain`;
+    * `occlusion_overlap`: fração da pessoa coberta por outra pessoa a partir da
+      qual a oclusão é considerada severa (todos os itens saem `uncertain`).
+    """
 
     correct_threshold: float = 0.75
-    predicted_factor: float = 0.70
-    unknown_state_factor: float = 0.50
     absence_base: float = 0.62
     absence_max: float = 0.70
     absence_candidate_penalty: float = 0.85
     max_confidence: float = 0.95
+    min_detection_confidence: float = 0.25
+    uncertain_below: float = 0.50
+    occlusion_overlap: float = 0.40
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], context: str) -> "ConfidenceSettings":
         settings = cls(
             correct_threshold=_ratio(data, "correct_threshold", context, 0.75),
-            predicted_factor=_ratio(data, "predicted_factor", context, 0.70),
-            unknown_state_factor=_ratio(data, "unknown_state_factor", context, 0.50),
             absence_base=_ratio(data, "absence_base", context, 0.62),
             absence_max=_ratio(data, "absence_max", context, 0.70),
             absence_candidate_penalty=_ratio(data, "absence_candidate_penalty", context, 0.85),
             max_confidence=_ratio(data, "max_confidence", context, 0.95),
+            min_detection_confidence=_ratio(data, "min_detection_confidence", context, 0.25),
+            uncertain_below=_ratio(data, "uncertain_below", context, 0.50),
+            occlusion_overlap=_ratio(data, "occlusion_overlap", context, 0.40),
         )
         if settings.absence_base > settings.absence_max:
             raise ValueError(f"{context}: absence_base não pode exceder absence_max")
@@ -173,9 +216,18 @@ class EquipmentPolicy:
     calibration: CalibrationSettings
     alias_map: Mapping[str, str] = field(default_factory=dict)
     custom_zones: Mapping[BodyZone, ZoneGeometry] = field(default_factory=dict)
+    model_version: Optional[str] = None
+    item_zones: Mapping[str, BodyZone] = field(default_factory=dict)
+    catalog_version: Optional[str] = None
+    unsupported_items: Tuple[str, ...] = ()
+
+    @property
+    def artifact_version(self) -> str:
+        """Versão do modelo publicada no `artifact_version` do EV-SINAL."""
+        return self.model_version or f"i9-geom-{self.policy_id}-{self.version}"
 
     def canonical_for(self, raw_class: str) -> Optional[str]:
-        """Classe canônica de um rótulo bruto vindo do I2 (case-insensitive)."""
+        """Classe canônica de um rótulo bruto vindo do I1 (case-insensitive)."""
         return self.alias_map.get(raw_class.strip().lower())
 
     def is_person(self, raw_class: str) -> bool:
@@ -196,6 +248,45 @@ class EquipmentPolicy:
         """True quando o rótulo não é de pessoa nem consta na política."""
         return not self.is_person(raw_class) and self.canonical_for(raw_class) is None
 
+    def with_catalog(self, catalog: "PpeCatalog") -> "EquipmentPolicy":
+        """Nova política com os EPIs do `PPE_CATALOG` do A5.
+
+        Mantém os parâmetros do motor (associação, confiança, zonas calibradas).
+        Itens sem zona do corpo conhecida pelo I9 ficam em `unsupported_items` e
+        não são avaliados. Levanta `ValueError` se o catálogo gerar conflito de
+        aliases; quem chama deve manter a política anterior nesse caso.
+        """
+        exigidos = set(catalog.required_items())
+        regras = []
+        sem_zona = []
+        for item in catalog.items:
+            atual = self.rules.get(item.equipment_item)
+            zone = self.item_zones.get(item.equipment_item) or (atual.zone if atual else None)
+            if zone is None:
+                sem_zona.append(item.equipment_item)
+                continue
+            regras.append(
+                ZoneRule(
+                    canonical_class=item.equipment_item,
+                    zone=zone,
+                    required=item.equipment_item in exigidos,
+                    min_association=atual.min_association if atual else DEFAULT_MIN_ASSOCIATION,
+                    aliases=item.class_aliases,
+                )
+            )
+        if not regras:
+            raise ValueError("PPE_CATALOG: nenhum item com zona do corpo conhecida pelo I9")
+
+        rules, class_order, alias_map = _index_rules(regras, self.person_classes, "PPE_CATALOG")
+        return replace(
+            self,
+            rules=rules,
+            class_order=class_order,
+            alias_map=alias_map,
+            catalog_version=catalog.artifact_version or None,
+            unsupported_items=tuple(sem_zona),
+        )
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "EquipmentPolicy":
         context = "policy"
@@ -203,28 +294,19 @@ class EquipmentPolicy:
         if not isinstance(raw_rules, list) or not raw_rules:
             raise ValueError("policy.equipment: esperado lista não vazia")
 
-        rules: Dict[str, ZoneRule] = {}
-        class_order: list = []
-        alias_map: Dict[str, str] = {}
-
-        for item in raw_rules:
-            rule = ZoneRule.from_dict(item, context)
-            if rule.canonical_class in rules:
-                raise ValueError(f"policy.equipment: classe duplicada {rule.canonical_class!r}")
-            rules[rule.canonical_class] = rule
-            class_order.append(rule.canonical_class)
-            for alias in (rule.canonical_class, *rule.aliases):
-                key = alias.strip().lower()
-                if key in alias_map and alias_map[key] != rule.canonical_class:
-                    raise ValueError(f"policy.equipment: alias ambíguo {alias!r}")
-                alias_map[key] = rule.canonical_class
-
         person_classes = tuple(
             str(p).strip().lower() for p in data.get("person_classes", ["pessoa", "person"])
         )
-        for person_class in person_classes:
-            if person_class in alias_map:
-                raise ValueError(f"policy: {person_class!r} é pessoa e não pode ser classe de EPI")
+        rules, class_order, alias_map = _index_rules(
+            (ZoneRule.from_dict(item, context) for item in raw_rules),
+            person_classes,
+            "policy.equipment",
+        )
+
+        item_zones_raw = data.get("item_zones", {})
+        if not isinstance(item_zones_raw, dict):
+            raise ValueError("policy.item_zones: esperado objeto {equipment_item: zona}")
+        item_zones = {str(k): resolve_zone(v) for k, v in item_zones_raw.items()}
 
         # Processa zonas customizadas (para calibração)
         custom_zones: Dict[BodyZone, ZoneGeometry] = {}
@@ -249,12 +331,14 @@ class EquipmentPolicy:
             version=str(data.get("version", "1.0")),
             person_classes=person_classes,
             rules=rules,
-            class_order=tuple(class_order),
+            class_order=class_order,
             association=AssociationSettings.from_dict(data.get("association", {}), "policy.association"),
             confidence=ConfidenceSettings.from_dict(data.get("confidence", {}), "policy.confidence"),
             calibration=CalibrationSettings.from_dict(data.get("calibration", {}), "policy.calibration"),
             alias_map=alias_map,
             custom_zones=custom_zones,
+            model_version=data.get("artifact_version"),
+            item_zones=item_zones,
         )
 
     @classmethod
