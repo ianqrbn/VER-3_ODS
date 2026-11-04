@@ -188,17 +188,17 @@ class KafkaPublisherAdapter:
         self._errors: List[str] = []
 
     def publish_event(self, event: ComplianceEvent) -> None:
-        body = event.as_dict()
-        self._producer.produce(
-            self.topic,
-            key=event.source_id.encode("utf-8"),
-            value=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=[
-                ("schema", body["schema"].encode("utf-8")),
-                ("message_id", body["message_id"].encode("utf-8")),
-            ],
-            on_delivery=self._on_delivery,
-        )
+        for body in event.messages():
+            self._producer.produce(
+                self.topic,
+                key=event.source_id.encode("utf-8"),
+                value=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                headers=[
+                    ("schema", body["schema"].encode("utf-8")),
+                    ("message_id", body["message_id"].encode("utf-8")),
+                ],
+                on_delivery=self._on_delivery,
+            )
         self._producer.poll(0)
 
     def flush(self) -> None:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
+import uuid
 
 from tests.helpers import (
     PERSON_BOX,
@@ -49,21 +51,91 @@ CAMPOS_ENVELOPE = (
     "payload",
 )
 
+# Especificação de interfaces 1.0, seção 6, tabela de `ods.i9.ppe_compliance`
 CAMPOS_PAYLOAD = (
     "frame_index",
-    "image_width",
-    "image_height",
-    "source_message_id",
+    "detection_id",
+    "bbox",
+    "calibrated",
     "catalog_version",
-    "calibration_version",
-    "calibration_status",
+    "items",
     "uncertain",
-    "persons",
-    "unassociated_equipment",
-    "ignored_detections",
 )
+CAMPOS_ITEM_OBRIGATORIOS = ("equipment_item", "compliance", "confidence")
+CAMPOS_ITEM = CAMPOS_ITEM_OBRIGATORIOS + ("bbox",)
+COMPLIANCE = ("CORRECT", "INCORRECT", "ABSENT")
+DATETIME_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
-CAMPOS_ITEM = ("equipment_item", "state", "confidence", "uncertain", "detection_id", "evidence")
+
+def _e_bbox(valor) -> bool:
+    return (
+        isinstance(valor, list)
+        and len(valor) == 4
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in valor)
+    )
+
+
+def _e_uuid(valor) -> bool:
+    try:
+        uuid.UUID(str(valor))
+    except ValueError:
+        return False
+    return True
+
+
+def erros_de_contrato(mensagem) -> list:
+    """Confere uma mensagem contra o envelope EV-SINAL e a tabela do payload."""
+    erros = []
+    for campo in CAMPOS_ENVELOPE:
+        if campo not in mensagem:
+            erros.append(f"envelope sem {campo}")
+    if erros:
+        return erros
+    if mensagem["message_type"] != "event":
+        erros.append("message_type")
+    if mensagem["schema"] != COMPLIANCE_SCHEMA or mensagem["schema_version"] != SCHEMA_VERSION:
+        erros.append("schema/schema_version")
+    if mensagem["producer"] != "I9":
+        erros.append("producer")
+    if not _e_uuid(mensagem["message_id"]):
+        erros.append("message_id não é UUID")
+    if not DATETIME_UTC.match(str(mensagem["published_at"])):
+        erros.append("published_at fora do ISO 8601 UTC")
+    for campo in ("source_id", "artifact_version"):
+        if not isinstance(mensagem[campo], str) or not mensagem[campo]:
+            erros.append(f"{campo} vazio")
+
+    payload = mensagem["payload"]
+    faltando = [c for c in CAMPOS_PAYLOAD if c not in payload]
+    sobrando = [c for c in payload if c not in CAMPOS_PAYLOAD]
+    erros += [f"payload sem {c}" for c in faltando]
+    erros += [f"payload com campo fora do contrato: {c}" for c in sobrando]
+    if faltando:
+        return erros
+    for campo in ("frame_index", "detection_id"):
+        valor = payload[campo]
+        if not isinstance(valor, int) or isinstance(valor, bool) or valor < 0:
+            erros.append(f"{campo} não é inteiro >= 0")
+    if not _e_bbox(payload["bbox"]):
+        erros.append("bbox não é [x_min, y_min, x_max, y_max]")
+    for campo in ("calibrated", "uncertain"):
+        if not isinstance(payload[campo], bool):
+            erros.append(f"{campo} não é boolean")
+    if not isinstance(payload["catalog_version"], str) or not payload["catalog_version"]:
+        erros.append("catalog_version não é string")
+    if not isinstance(payload["items"], list):
+        return erros + ["items não é array"]
+    for i, item in enumerate(payload["items"]):
+        erros += [f"items[{i}] sem {c}" for c in CAMPOS_ITEM_OBRIGATORIOS if c not in item]
+        erros += [f"items[{i}] com campo fora do contrato: {c}" for c in item if c not in CAMPOS_ITEM]
+        if item.get("compliance") not in COMPLIANCE:
+            erros.append(f"items[{i}].compliance fora do enum")
+        confianca = item.get("confidence")
+        if not isinstance(confianca, (int, float)) or not 0.0 <= confianca <= 1.0:
+            erros.append(f"items[{i}].confidence fora de 0.0–1.0")
+        if "bbox" in item and not _e_bbox(item["bbox"]):
+            erros.append(f"items[{i}].bbox inválida")
+    return erros
 
 
 def run_pipeline(max_frames: int = 3, as_json: bool = False):
@@ -100,34 +172,47 @@ class EventEnvelopeTest(unittest.TestCase):
         _, events = run_pipeline()
         self.assertEqual(len(events), 3)
         for event in events:
-            body = event.as_dict()
-            for campo in CAMPOS_ENVELOPE:
-                self.assertIn(campo, body)
-            self.assertEqual(body["message_type"], "event")
-            self.assertEqual(body["schema"], COMPLIANCE_SCHEMA)
-            self.assertEqual(body["schema"], "ods.i9.ppe_compliance")
-            self.assertEqual(body["schema_version"], SCHEMA_VERSION)
-            self.assertEqual(body["producer"], "I9")
-            self.assertEqual(body["artifact_version"], default_policy().artifact_version)
-            for campo in CAMPOS_PAYLOAD:
-                self.assertIn(campo, body["payload"])
-            for person in body["payload"]["persons"]:
-                for item in person["equipment"]:
-                    for campo in CAMPOS_ITEM:
-                        self.assertIn(campo, item)
+            mensagens = event.messages()
+            self.assertEqual(len(mensagens), len(event.relations))
+            for body in mensagens:
+                self.assertEqual(erros_de_contrato(body), [])
+                self.assertEqual(body["schema"], "ods.i9.ppe_compliance")
+                self.assertEqual(body["artifact_version"], default_policy().artifact_version)
 
-    def test_message_id_e_unico_por_evento(self):
+    def test_uma_mensagem_por_pessoa_com_a_pessoa_do_i1(self):
+        pipeline, events = run_pipeline(max_frames=1)
+        entrada = {d.detection_id: d.raw for d in pipeline.ingestion_port.frames[0].detections}
+        for relation, body in zip(events[0].relations, events[0].messages()):
+            payload = body["payload"]
+            self.assertEqual(payload["detection_id"], relation.person.detection_id)
+            self.assertEqual(payload["bbox"], entrada[payload["detection_id"]]["bbox"])
+            for item, avaliacao in zip(payload["items"], relation.equipment):
+                self.assertEqual(item["compliance"], avaliacao.state.compliance)
+                if avaliacao.detection is None:
+                    self.assertNotIn("bbox", item)
+                else:
+                    self.assertEqual(item["bbox"], entrada[avaliacao.detection.detection_id]["bbox"])
+
+    def test_message_id_e_unico_por_mensagem(self):
         _, events = run_pipeline()
-        self.assertEqual(len({e.message_id for e in events}), len(events))
+        ids = [m["message_id"] for e in events for m in e.messages()]
+        self.assertEqual(len(set(ids)), len(ids))
+        # o mesmo evento gera sempre os mesmos ids (republicar não duplica)
+        self.assertEqual(
+            [m["message_id"] for m in events[0].messages()],
+            [m["message_id"] for m in events[0].messages()],
+        )
 
     def test_evento_e_serializavel_em_json(self):
         _, events = run_pipeline(max_frames=1)
-        json.dumps(events[0].as_dict(), ensure_ascii=False)
+        json.dumps(events[0].frame_report(), ensure_ascii=False)
+        for body in events[0].messages():
+            json.dumps(body, ensure_ascii=False)
 
     def test_chave_do_quadro_e_repassada_do_i1(self):
         pipeline, events = run_pipeline(max_frames=1)
         entrada = pipeline.ingestion_port.frames[0]
-        body = events[0].as_dict()
+        body = events[0].frame_report()
         self.assertEqual(body["source_id"], "cam0")
         self.assertEqual(body["session_id"], entrada.session_id)
         self.assertEqual(body["sequence"], entrada.sequence)
@@ -139,7 +224,7 @@ class EventEnvelopeTest(unittest.TestCase):
 
     def test_calibracao_aparece_no_evento(self):
         _, events = run_pipeline(max_frames=1)
-        payload = events[0].as_dict()["payload"]
+        payload = events[0].frame_report()["payload"]
         self.assertEqual(payload["calibration_status"], "valid")
         self.assertEqual(payload["calibration_version"], "cam0-v3")
 
@@ -148,7 +233,7 @@ class DetectionPassthroughTest(unittest.TestCase):
     def test_pessoa_repassa_detection_id_e_bbox_do_i1(self):
         pipeline, events = run_pipeline(max_frames=1)
         originais = {d.detection_id: d.as_dict() for d in pipeline.ingestion_port.frames[0].detections}
-        for person in events[0].as_dict()["payload"]["persons"]:
+        for person in events[0].frame_report()["payload"]["persons"]:
             original = originais[person["detection_id"]]
             self.assertEqual(person["bbox"], original["bbox"])
             self.assertEqual(person["confidence"], original["confidence"])
@@ -168,21 +253,21 @@ class EventContentTest(unittest.TestCase):
         _, events = run_pipeline(max_frames=1)
         estados = {
             item["state"]
-            for person in events[0].as_dict()["payload"]["persons"]
+            for person in events[0].frame_report()["payload"]["persons"]
             for item in person["equipment"]
         }
         self.assertEqual(estados, {"CORRETO", "INCORRETO", "AUSENTE"})
 
     def test_deteccao_fraca_vai_para_ignored_detections(self):
         _, events = run_pipeline()
-        ignorados = events[-1].as_dict()["payload"]["ignored_detections"]
+        ignorados = events[-1].frame_report()["payload"]["ignored_detections"]
         self.assertEqual(len(ignorados), 1)
         self.assertEqual(ignorados[0]["reason"], "low_detection_confidence")
         self.assertEqual(ignorados[0]["class"], "colete")
 
     def test_epi_sem_dono_vai_para_unassociated(self):
         _, events = run_pipeline(max_frames=1)
-        nao_relacionados = events[0].as_dict()["payload"]["unassociated_equipment"]
+        nao_relacionados = events[0].frame_report()["payload"]["unassociated_equipment"]
         self.assertEqual(len(nao_relacionados), 1)
         self.assertEqual(nao_relacionados[0]["reason"], "below_association_threshold")
 
@@ -190,7 +275,7 @@ class EventContentTest(unittest.TestCase):
         _, events = run_pipeline(max_frames=1)
         ausentes = [
             item
-            for person in events[0].as_dict()["payload"]["persons"]
+            for person in events[0].frame_report()["payload"]["persons"]
             for item in person["equipment"]
             if item["state"] == "AUSENTE"
         ]
@@ -201,7 +286,7 @@ class EventContentTest(unittest.TestCase):
 
     def test_uncertain_do_quadro_reflete_os_itens(self):
         _, events = run_pipeline(max_frames=1)
-        payload = events[0].as_dict()["payload"]
+        payload = events[0].frame_report()["payload"]
         algum = any(item["uncertain"] for p in payload["persons"] for item in p["equipment"])
         self.assertEqual(payload["uncertain"], algum)
 
@@ -213,9 +298,11 @@ class EventContentTest(unittest.TestCase):
         capacete = make_detection(1, "capacete", make_bbox(468, 884, 144, 150))
         with quiet():
             event = build_message_pipeline([make_event([capacete])]).run_once()
-        payload = event.as_dict()["payload"]
+        payload = event.frame_report()["payload"]
         self.assertEqual(payload["persons"], [])
         self.assertEqual(len(payload["unassociated_equipment"]), 1)
+        # o contrato é uma mensagem por pessoa: sem pessoa, nada é publicado
+        self.assertEqual(event.messages(), [])
 
     def test_saida_no_console_em_json(self):
         _, events = run_pipeline(max_frames=1, as_json=True)
@@ -241,7 +328,7 @@ class I1MessageTest(unittest.TestCase):
     def test_exemplo_do_i1_gera_conformidade(self):
         sent = []
         event = build_message_pipeline([json.dumps(self.message)], sent=sent).run_once()
-        body = event.as_dict()
+        body = event.frame_report()
 
         self.assertEqual(body["source_id"], "cam0")
         self.assertEqual(body["session_id"], self.message["session_id"])
@@ -262,7 +349,34 @@ class I1MessageTest(unittest.TestCase):
         topic, key, value = sent[0]
         self.assertEqual(topic, "ods.i9.ppe_compliance")
         self.assertEqual(key, "cam0")
-        self.assertEqual(json.loads(value)["message_id"], body["message_id"])
+        publicada = json.loads(value)
+        self.assertEqual(erros_de_contrato(publicada), [])
+        self.assertEqual(publicada["message_id"], event.messages()[0]["message_id"])
+        self.assertEqual(publicada["sequence"], 42)
+        payload = publicada["payload"]
+        self.assertEqual(payload["frame_index"], 42)
+        self.assertEqual(payload["detection_id"], 0)
+        self.assertEqual(payload["bbox"], [412, 180, 598, 702])
+        # sem mensagem do I3 neste pipeline: operou em pixels
+        self.assertIs(payload["calibrated"], False)
+        self.assertEqual(payload["catalog_version"], "local-default-1.0")
+        self.assertEqual(
+            payload["items"],
+            [
+                {"equipment_item": "capacete", "compliance": "CORRECT",
+                 "confidence": itens["capacete"]["confidence"], "bbox": [450, 182, 540, 255]},
+                {"equipment_item": "colete", "compliance": "CORRECT",
+                 "confidence": itens["colete"]["confidence"], "bbox": [425, 290, 585, 510]},
+            ],
+        )
+
+    def test_exemplo_com_calibracao_do_i3_marca_calibrated(self):
+        calibracao = (ROOT / "examples" / "i3_calibration.json").read_text(encoding="utf-8")
+        sent = []
+        build_message_pipeline([json.dumps(self.message)], [calibracao], sent=sent).run_once()
+        publicada = json.loads(sent[0][2])
+        self.assertEqual(erros_de_contrato(publicada), [])
+        self.assertIs(publicada["payload"]["calibrated"], True)
 
     def test_mensagens_invalidas_sao_rejeitadas_sem_parar_o_consumo(self):
         schema_errado = dict(self.message, schema="ods.i2.tracks")
@@ -319,7 +433,7 @@ class CalibrationBehaviourTest(unittest.TestCase):
             policy=policy,
         )
         with quiet():
-            payload = pipeline.run_once().as_dict()["payload"]
+            payload = pipeline.run_once().frame_report()["payload"]
         self.assertEqual(payload["calibration_status"], "missing")
         self.assertIsNone(payload["calibration_version"])
         # a verificação geométrica continua válida sem homografia
@@ -353,6 +467,25 @@ class CalibrationBehaviourTest(unittest.TestCase):
         )
         self.assertIsNone(calibration.homography)
         self.assertEqual(adapter.get_calibration("cam0").calibration_version, "cam0-v1")
+
+    def test_calibracao_no_formato_do_contrato(self):
+        mensagem = json.loads((ROOT / "examples" / "i3_calibration.json").read_text(encoding="utf-8"))
+        calibration = MessageCalibrationAdapter().on_message(mensagem)
+        # versão vem do artifact_version do envelope; matriz de homography_px_to_m
+        self.assertEqual(calibration.calibration_version, "cal-cam0-1")
+        self.assertEqual(
+            calibration.homography,
+            tuple(tuple(linha) for linha in mensagem["payload"]["homography_px_to_m"]),
+        )
+        self.assertEqual(calibration.space_id, "obra-civil")
+        self.assertEqual(calibration.meters_per_unit, 1.0)
+
+    def test_calibracao_sem_versao_e_rejeitada(self):
+        adapter = MessageCalibrationAdapter()
+        mensagem = json.loads((ROOT / "examples" / "i3_calibration.json").read_text(encoding="utf-8"))
+        del mensagem["artifact_version"]
+        self.assertIsNone(adapter.on_message(mensagem))
+        self.assertIn("artifact_version", adapter.rejected[0][1])
 
     def test_adapter_devolve_apenas_a_sua_camera(self):
         adapter = MockCalibrationAdapter()

@@ -33,11 +33,23 @@ PRODUCER = "I9"
 
 
 class RelationalState(str, Enum):
-    """Estados relacionais previstos no contrato de saída."""
+    """Estados relacionais do motor; no contrato saem como `compliance` (inglês)."""
 
     CORRETO = "CORRETO"
     INCORRETO = "INCORRETO"
     AUSENTE = "AUSENTE"
+
+    @property
+    def compliance(self) -> str:
+        """Valor do enum `items[].compliance` de `ods.i9.ppe_compliance`."""
+        return _COMPLIANCE[self]
+
+
+_COMPLIANCE = {
+    RelationalState.CORRETO: "CORRECT",
+    RelationalState.INCORRETO: "INCORRECT",
+    RelationalState.AUSENTE: "ABSENT",
+}
 
 
 def _require(payload: Mapping[str, Any], key: str, context: str) -> Any:
@@ -285,31 +297,48 @@ class Calibration:
         return 1.0
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any], source_id: Optional[str] = None) -> "Calibration":
+    def from_payload(
+        cls,
+        payload: Mapping[str, Any],
+        source_id: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> "Calibration":
+        """Lê o conteúdo do artefato CALIBRATION (Especificação de interfaces 1.0).
+
+        Formato do contrato: `homography_px_to_m` no payload e a versão no
+        `artifact_version` do envelope (`version`). O formato anterior
+        (`homography` e `calibration_version` no payload) continua aceito.
+        """
         context = "calibração"
         matrix = None
-        matrix_raw = payload.get("homography")
+        key = "homography_px_to_m" if "homography_px_to_m" in payload else "homography"
+        matrix_raw = payload.get(key)
         if matrix_raw is not None:
             if not isinstance(matrix_raw, list) or len(matrix_raw) != 3:
-                raise ValueError("calibração.homography: esperado array 3x3")
+                raise ValueError(f"calibração.{key}: esperado array 3x3")
             matrix = tuple(
-                tuple(_as_float(v, "homography", context) for v in linha)
+                tuple(_as_float(v, key, context) for v in linha)
                 for linha in matrix_raw
             )
             if any(len(linha) != 3 for linha in matrix):
-                raise ValueError("calibração.homography: esperado array 3x3")
+                raise ValueError(f"calibração.{key}: esperado array 3x3")
 
         if source_id is None:
             source_id = payload.get("source_id", payload.get("camera_id"))
         if source_id is None:
             raise ValueError(f"{context}: campo obrigatório ausente -> 'source_id'")
 
+        if version is None:
+            version = payload.get("calibration_version")
+        if version is None:
+            raise ValueError(f"{context}: campo obrigatório ausente -> 'artifact_version'")
+
         reference = payload.get("reference_frame") or {}
         rms_raw = payload.get("reprojection_rms_cm")
 
         return cls(
             source_id=str(source_id),
-            calibration_version=str(_require(payload, "calibration_version", context)),
+            calibration_version=str(version),
             valid_from=str(payload.get("valid_from", "")),
             homography=matrix,  # type: ignore[arg-type]
             space_id=str(reference.get("space_id", "")),
@@ -323,9 +352,13 @@ class Calibration:
 
     @classmethod
     def from_event(cls, event: Mapping[str, Any]) -> "Calibration":
-        """Lê um evento completo do I3; a câmera vem do `source_id` do envelope."""
+        """Lê um evento completo do I3; câmera e versão vêm do envelope."""
         _check_schema(event, CALIBRATION_SCHEMA)
-        return cls.from_payload(_require(event, "payload", "event"), event.get("source_id"))
+        return cls.from_payload(
+            _require(event, "payload", "event"),
+            event.get("source_id"),
+            event.get("artifact_version"),
+        )
 
 
 @dataclass(frozen=True)
@@ -377,6 +410,17 @@ class EquipmentEvaluation:
             "detection_id": self.detection.detection_id if self.detection else None,
             "evidence": self.evidence,
         }
+
+    def contract_item(self) -> Dict[str, Any]:
+        """Item de `items[]` no contrato; `bbox` só quando o EPI foi localizado."""
+        item: Dict[str, Any] = {
+            "equipment_item": self.canonical_class,
+            "compliance": self.state.compliance,
+            "confidence": round(self.confidence, 4),
+        }
+        if self.detection is not None:
+            item["bbox"] = self.detection.raw.get("bbox")
+        return item
 
 
 @dataclass(frozen=True)
@@ -439,15 +483,20 @@ class CalibrationStatus:
     version: Optional[str] = None
     status: str = "missing"
     reason: Optional[str] = None
+    # a homografia do I3 foi usada na associação (`calibrated` do contrato)
+    applied: bool = False
 
 
 @dataclass(frozen=True)
 class ComplianceEvent:
-    """Evento de saída do I9 (`ods.i9.ppe_compliance`), um por quadro.
+    """Resultado do I9 para um quadro.
 
+    `messages()` gera o que é publicado em `ods.i9.ppe_compliance`: uma
+    mensagem por pessoa detectada (contrato da Especificação de interfaces 1.0).
     O envelope segue o EV-SINAL: `source_id`, `session_id`, `captured_at` e
     `sequence` são os do quadro do I1, para que o S2 case a pessoa com o rastro
-    do I2 pela chave do quadro + `detection_id`.
+    do I2 pela chave do quadro + `detection_id`. `frame_report()` é o relatório
+    do quadro inteiro, para diagnóstico; não é publicado.
     """
 
     source_id: str
@@ -466,19 +515,49 @@ class ComplianceEvent:
     source_message_id: Optional[str] = None
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     published_at: str = field(default_factory=utc_now_iso)
+    # um message_id por mensagem publicada, fixado na criação (idempotência do envio)
+    message_ids: Tuple[str, ...] = field(init=False, default=())
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "message_ids", tuple(str(uuid.uuid4()) for _ in self.relations)
+        )
 
     @property
     def uncertain(self) -> bool:
         return any(r.uncertain for r in self.relations)
 
-    def as_dict(self) -> Dict[str, Any]:
+    def messages(self) -> List[Dict[str, Any]]:
+        """Mensagens `ods.i9.ppe_compliance`, uma por pessoa; vazia sem pessoas."""
+        return [
+            {
+                "message_type": "event",
+                "message_id": message_id,
+                "schema": COMPLIANCE_SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "producer": PRODUCER,
+                "published_at": self.published_at,
+                "captured_at": self.captured_at,
+                "source_id": self.source_id,
+                "session_id": self.session_id,
+                "sequence": self.sequence,
+                "artifact_version": self.artifact_version,
+                "payload": {
+                    "frame_index": self.frame_index,
+                    "detection_id": relation.person.detection_id,
+                    "bbox": relation.person.raw.get("bbox"),
+                    "calibrated": self.calibration.applied,
+                    "catalog_version": self.catalog_version,
+                    "items": [e.contract_item() for e in relation.equipment],
+                    "uncertain": relation.uncertain,
+                },
+            }
+            for relation, message_id in zip(self.relations, self.message_ids)
+        ]
+
+    def frame_report(self) -> Dict[str, Any]:
+        """Relatório do quadro inteiro (diagnóstico local, fora do contrato)."""
         return {
-            "message_type": "event",
-            "message_id": self.message_id,
-            "schema": COMPLIANCE_SCHEMA,
-            "schema_version": SCHEMA_VERSION,
-            "producer": PRODUCER,
-            "published_at": self.published_at,
             "captured_at": self.captured_at,
             "source_id": self.source_id,
             "session_id": self.session_id,

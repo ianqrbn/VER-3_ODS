@@ -199,14 +199,17 @@ I9 funciona normalmente, apenas sem o corte métrico de alcance. Demais campos
 
 ### Saída — conformidade de EPI (I9, envelope EV-SINAL)
 
+Contrato `ods.i9.ppe_compliance` da Especificação de interfaces 1.0 (seção 6):
+**uma mensagem por pessoa detectada no quadro**.
+
 ```json
 {
   "message_type": "event",
-  "message_id": "99fbd52f-3ea3-4ea9-bd02-6cad4d567207",
+  "message_id": "9f868655-5526-412d-8c23-42c7fdc81a88",
   "schema": "ods.i9.ppe_compliance",
   "schema_version": "1.0",
   "producer": "I9",
-  "published_at": "2026-10-31T14:17:02.294Z",
+  "published_at": "2026-11-04T14:50:11.798Z",
   "captured_at": "2026-10-18T22:01:10.110Z",
   "source_id": "cam0",
   "session_id": "9c2a1f3e-4d5b-4c6a-9e8f-0a1b2c3d4e5f",
@@ -214,74 +217,40 @@ I9 funciona normalmente, apenas sem o corte métrico de alcance. Demais campos
   "artifact_version": "i9-geom-default-1.0",
   "payload": {
     "frame_index": 42,
-    "image_width": 1280,
-    "image_height": 720,
-    "source_message_id": "a8f5f167-99b4-4d2b-8b1e-6c9a2e4f1d3b",
-    "catalog_version": "ppe-a5-3",
-    "calibration_version": null,
-    "calibration_status": "missing",
-    "uncertain": false,
-    "persons": [
-      {
-        "detection_id": 0,
-        "class": "pessoa",
-        "confidence": 0.9412,
-        "bbox": [412, 180, 598, 702],
-        "uncertain": false,
-        "uncertain_reasons": [],
-        "equipment": [
-          {
-            "equipment_item": "capacete",
-            "state": "CORRETO",
-            "confidence": 0.8148,
-            "uncertain": false,
-            "detection_id": 1,
-            "evidence": {
-              "association_score": 0.8814,
-              "placement_score": 0.9625,
-              "detection_confidence": 0.9604,
-              "person_normalized_center": { "u": 0.4462, "v": 0.9262 },
-              "expected_zone": "HEAD"
-            }
-          },
-          {
-            "equipment_item": "colete",
-            "state": "AUSENTE",
-            "confidence": 0.5835,
-            "uncertain": false,
-            "detection_id": null,
-            "evidence": { "reason": "no_candidate_in_person_region", "zone": "TORSO" }
-          }
-        ]
-      }
+    "detection_id": 0,
+    "bbox": [412, 180, 598, 702],
+    "calibrated": true,
+    "catalog_version": "local-default-1.0",
+    "items": [
+      { "equipment_item": "capacete", "compliance": "CORRECT", "confidence": 0.8148, "bbox": [450, 182, 540, 255] },
+      { "equipment_item": "colete", "compliance": "ABSENT", "confidence": 0.5835 }
     ],
-    "unassociated_equipment": [
-      { "equipment_item": "capacete", "detection_id": 6, "reason": "below_association_threshold", "best_association_score": 0.5963 }
-    ],
-    "ignored_detections": [
-      { "detection_id": 5, "class": "colete", "reason": "low_detection_confidence" }
-    ]
+    "uncertain": false
   }
 }
 ```
 
 Regras do contrato de saída:
 
-* um evento por quadro, mesmo sem pessoas (`persons: []`);
+* uma mensagem por pessoa; quadro sem pessoas não publica nada;
 * `captured_at`, `source_id`, `session_id` e `sequence` são os do quadro do I1;
-  `source_message_id` aponta para a mensagem de origem (rastreabilidade);
-* `catalog_version` é o `artifact_version` do PPE_CATALOG em uso (`null` com a
-  lista local);
+  `frame_index`, `detection_id` e `bbox` são os da pessoa no I1, sem conversão,
+  para o S2 casar com o rastro do I2;
+* `calibrated` é `true` quando a homografia do I3 para `source_id` foi aceita e
+  usada na associação; sem ela o I9 opera em pixels;
+* `catalog_version` é o `artifact_version` do PPE_CATALOG em uso ou, com a
+  lista local de `config/policy.json`, `local-<policy_id>-<version>`;
 * `artifact_version` é a versão do modelo do I9: `artifact_version` da política
   ou, por padrão, `i9-geom-<policy_id>-<version>`;
-* `AUSENTE` sempre traz `detection_id: null`;
-* **toda detecção de entrada aparece exatamente uma vez**: em `persons` (pessoa
-  ou `detection_id` de um item), em `unassociated_equipment` ou em
-  `ignored_detections`;
-* `uncertain` existe por item, por pessoa (qualquer item incerto ou oclusão
-  severa, com o motivo em `uncertain_reasons`) e no quadro;
+* `items[].compliance` é `CORRECT`, `INCORRECT` ou `ABSENT`; `items[].bbox`
+  é a caixa do EPI no I1 e não aparece em `ABSENT`;
+* `uncertain` é `true` quando algum item é incerto ou há oclusão severa;
 * `confidence` (0–1) é um score geométrico do quadro atual, não uma
   probabilidade calibrada.
+
+Para diagnóstico, `ComplianceEvent.frame_report()` (e a saída sem `--json`)
+mostra o quadro inteiro: evidências, EPIs sem dono e detecções descartadas.
+Esse relatório não é publicado.
 
 ## Catálogo de EPI (PPE_CATALOG do A5)
 

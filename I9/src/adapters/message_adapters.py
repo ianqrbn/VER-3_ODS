@@ -91,5 +91,5 @@ class MessagePublisherAdapter:
         self.topic = topic
 
     def publish_event(self, event: ComplianceEvent) -> None:
-        value = json.dumps(event.as_dict(), ensure_ascii=False)
-        self._send(self.topic, event.source_id, value)
+        for body in event.messages():
+            self._send(self.topic, event.source_id, json.dumps(body, ensure_ascii=False))

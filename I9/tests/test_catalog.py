@@ -224,7 +224,7 @@ class PipelineCatalogTest(unittest.TestCase):
             catalog_path=str(ROOT / "examples" / "a5_ppe_catalog.json"),
         )
         with quiet():
-            body = pipeline.run_once().as_dict()
+            body = pipeline.run_once().frame_report()
         itens = {i["equipment_item"]: i for i in body["payload"]["persons"][0]["equipment"]}
         self.assertEqual(set(itens), {"capacete", "colete", "luvas", "oculos"})
         self.assertEqual(itens["capacete"]["state"], "CORRETO")
@@ -258,7 +258,7 @@ class KafkaCatalogTest(unittest.TestCase):
 
         body = json.loads(outputs(producer)[0]["value"])
         self.assertEqual(body["payload"]["catalog_version"], "ppe-a5-3")
-        itens = {i["equipment_item"] for i in body["payload"]["persons"][0]["equipment"]}
+        itens = {i["equipment_item"] for i in body["payload"]["items"]}
         self.assertEqual(itens, {"capacete", "colete", "luvas", "oculos"})
 
 

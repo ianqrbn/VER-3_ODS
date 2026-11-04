@@ -3,7 +3,7 @@ Orquestração do componente I9 por quadro.
 
 O pipeline é deliberadamente burro: busca um evento de detecções do I1, garante
 a calibração da câmera (I3), executa a associação geométrica, infere os estados
-relacionais e publica `ods.i9.ppe_compliance`. Não há estado acumulado entre
+relacionais e publica `ods.i9.ppe_compliance` (uma mensagem por pessoa). Não há estado acumulado entre
 quadros — o cruzamento temporal é responsabilidade do S2.
 """
 
@@ -82,7 +82,7 @@ class I9Pipeline:
             image_width=frame.image_width,
             image_height=frame.image_height,
             artifact_version=self.policy.artifact_version,
-            catalog_version=self.policy.catalog_version,
+            catalog_version=self.policy.effective_catalog_version,
             calibration=self.calibration_store.status(frame.source_id),
             relations=tuple(evaluations),
             unassociated_equipment=tuple(pairing.unassociated_equipment),

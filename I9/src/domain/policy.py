@@ -226,6 +226,11 @@ class EquipmentPolicy:
         """Versão do modelo publicada no `artifact_version` do EV-SINAL."""
         return self.model_version or f"i9-geom-{self.policy_id}-{self.version}"
 
+    @property
+    def effective_catalog_version(self) -> str:
+        """`catalog_version` publicado: o PPE_CATALOG do A5 ou, sem ele, a lista local."""
+        return self.catalog_version or f"local-{self.policy_id}-{self.version}"
+
     def canonical_for(self, raw_class: str) -> Optional[str]:
         """Classe canônica de um rótulo bruto vindo do I1 (case-insensitive)."""
         return self.alias_map.get(raw_class.strip().lower())

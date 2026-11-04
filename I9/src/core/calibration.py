@@ -52,7 +52,11 @@ class CalibrationStore:
                 status="rejected" if source_id in self._rejected else "missing",
                 reason=self._rejected.get(source_id),
             )
-        return CalibrationStatus(version=calibration.calibration_version, status="valid")
+        return CalibrationStatus(
+            version=calibration.calibration_version,
+            status="valid",
+            applied=calibration.homography is not None,
+        )
 
     def _validate(self, calibration: Calibration) -> Optional[str]:
         rms = calibration.reprojection_rms_cm

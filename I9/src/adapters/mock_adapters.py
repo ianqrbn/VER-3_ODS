@@ -173,11 +173,12 @@ class MockConsoleOutputAdapter:
 
     def publish_event(self, event: ComplianceEvent) -> None:
         self.events.append(event)
-        body = event.as_dict()
         if self.as_json:
-            print(json.dumps(body, ensure_ascii=False, indent=2))
+            for message in event.messages():
+                print(json.dumps(message, ensure_ascii=False, indent=2))
             return
 
+        body = event.frame_report()
         payload = body["payload"]
         print(
             f"\n=== {body['source_id']} | frame {payload['frame_index']} "

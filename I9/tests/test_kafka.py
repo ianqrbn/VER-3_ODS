@@ -244,8 +244,8 @@ class ServiceTest(unittest.TestCase):
         service, producer, _, _ = build_service([i1_message(1)], calibrations=[calibracao])
         service.run(max_frames=1)
         body = json.loads(outputs(producer)[0]["value"])
-        self.assertEqual(body["payload"]["calibration_status"], "valid")
-        self.assertEqual(body["payload"]["calibration_version"], "cam0-v1")
+        # a calibração de cam0 tem homografia, então foi aplicada na associação
+        self.assertIs(body["payload"]["calibrated"], True)
 
     def test_stop_encerra_o_laco(self):
         service, _, consumer, _ = build_service([i1_message(1), i1_message(2)])
