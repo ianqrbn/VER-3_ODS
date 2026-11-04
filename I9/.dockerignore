@@ -1,0 +1,8 @@
+# o dataset só é usado na calibração offline, não no serviço
+PPE detection f.v9i.coco/
+**/__pycache__/
+**/*.pyc
+deploy/
+.env
+Dockerfile
+docker-compose.yml

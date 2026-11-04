@@ -72,8 +72,9 @@ registradas em `rejected` sem interromper o consumo.
 
 ```bash
 pip install -r requirements-kafka.txt        # confluent-kafka (só para o modo Kafka)
-docker compose up -d                         # broker local em localhost:9092 + tópicos
+docker compose up -d kafka kafka-init        # só o broker em localhost:9092 + tópicos
 python3 main.py --kafka                      # serviço contínuo do I9
+# ou tudo em containers: docker compose up -d --build (I9 incluso, sem o passo acima)
 
 # em outro terminal
 python3 tools/kafka_cli.py send examples/i3_calibration.json
@@ -114,6 +115,24 @@ Configuração por variáveis de ambiente (defaults **provisórios**, a confirma
 | `I9_AUTO_OFFSET_RESET` | `latest` (sem offset salvo, começa do quadro atual) |
 | `I9_DELIVERY_TIMEOUT_S` / `I9_POLL_TIMEOUT_S` / `I9_CALIBRATION_WARMUP_S` | `10` / `1` / `3` |
 | `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD`, `KAFKA_SSL_CA_LOCATION` | `PLAINTEXT` / vazio |
+
+### VM no Compute Engine (Google Cloud)
+
+`deploy/gce/deploy.sh` cria uma VM Debian 12, instala o Docker, copia o I9 (sem o
+dataset) e roda `docker compose up -d --build`. A VM tem hora de término
+(`TERMINATION_TIME`, padrão `2026-11-07T00:00:00-03:00`): nesse momento o
+Compute Engine a exclui junto com o disco.
+
+```bash
+gcloud auth login && gcloud config set project SEU_PROJETO
+./deploy/gce/deploy.sh                                   # Kafka acessível só dentro da VM
+ALLOWED_CIDR=200.10.20.30/32 ./deploy/gce/deploy.sh      # libera a 9092 para essa faixa
+./deploy/gce/teardown.sh                                 # exclui a VM e a regra de firewall
+```
+
+Com `ALLOWED_CIDR`, o broker anuncia o IP externo da VM (`KAFKA_EXTERNAL_HOST`
+no `.env`) e os outros componentes usam `KAFKA_BOOTSTRAP_SERVERS=<ip>:9092`. O
+listener é `PLAINTEXT`, sem autenticação: libere só IPs conhecidos.
 
 ## Contratos
 
