@@ -134,6 +134,26 @@ Com `ALLOWED_CIDR`, o broker anuncia o IP externo da VM (`KAFKA_EXTERNAL_HOST`
 no `.env`) e os outros componentes usam `KAFKA_BOOTSTRAP_SERVERS=<ip>:9092`. O
 listener é `PLAINTEXT`, sem autenticação: libere só IPs conhecidos.
 
+### Barramento B3 compartilhado (34.66.235.91:9093)
+
+Para ligar o I9 ao broker do B3 em vez do Kafka local, use
+`docker-compose.b3.yml`, que sobe só o I9. A configuração fica em `b3.env`,
+fora do git porque pode ter credenciais:
+
+```bash
+cp b3.env.example b3.env                  # ajuste protocolo e credenciais
+docker compose -f docker-compose.b3.yml run --rm --build i9 python3 tools/kafka_cli.py check
+docker compose -f docker-compose.b3.yml up -d --build
+docker compose -f docker-compose.b3.yml logs -f i9
+```
+
+Sem Docker: `set -a; . ./b3.env; set +a; python3 main.py --kafka`.
+
+`check` não publica nada: conecta, mostra o endereço que o broker anuncia
+(é por ele que o cliente segue depois da conexão inicial) e confere se os
+tópicos do I9 existem. No barramento compartilhado, não use
+`kafka_cli.py send` com as fixtures: as mensagens chegariam ao S2 e ao A5.
+
 ## Contratos
 
 ### Entrada — detecções (I1)

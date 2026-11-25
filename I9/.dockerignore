@@ -6,3 +6,4 @@ deploy/
 .env
 Dockerfile
 docker-compose.yml
+b3.env

@@ -1,0 +1,10 @@
+# Só o serviço do I9, ligado ao barramento B3 externo (sem Kafka local).
+#   cp b3.env.example b3.env      # e ajuste protocolo/credenciais
+#   docker compose -f docker-compose.b3.yml run --rm i9 python3 tools/kafka_cli.py check
+#   docker compose -f docker-compose.b3.yml up -d --build
+services:
+  i9:
+    build: .
+    container_name: ods-i9-b3
+    restart: unless-stopped
+    env_file: b3.env
