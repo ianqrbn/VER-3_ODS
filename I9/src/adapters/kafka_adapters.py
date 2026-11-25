@@ -140,6 +140,20 @@ class KafkaSettings:
             "group.id": f"{self.group_id}.artifacts",
         }
 
+    def admin_config(self) -> Dict[str, Any]:
+        return self._common_config()
+
+    @property
+    def topics(self) -> List[str]:
+        """Tópicos que o I9 consome ou publica (DLQ só quando ligado)."""
+        topicos = [
+            self.detections_topic,
+            self.calibration_topic,
+            self.artifacts_topic,
+            self.compliance_topic,
+        ]
+        return topicos + ([self.dead_letter_topic] if self.dead_letter_topic else [])
+
     def producer_config(self) -> Dict[str, Any]:
         return {
             **self._common_config(),

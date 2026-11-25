@@ -8,6 +8,9 @@ Utilitário para testar o I9 no Kafka sem os demais componentes.
     # acompanha a saída do I9
     python3 tools/kafka_cli.py tail ods.i9.ppe_compliance
 
+    # testa a conexão com o broker e confere os tópicos do I9, sem publicar nada
+    python3 tools/kafka_cli.py check
+
 A chave de cada mensagem é o `source_id` do envelope. O broker vem de
 `KAFKA_BOOTSTRAP_SERVERS` (padrão localhost:9092).
 """
@@ -25,6 +28,32 @@ sys.path.insert(0, str(ROOT))
 
 from main import read_messages  # noqa: E402
 from src.adapters.kafka_adapters import KafkaSettings, create_consumer, create_producer  # noqa: E402
+
+
+def check(settings: KafkaSettings, timeout_s: float) -> None:
+    from confluent_kafka.admin import AdminClient
+    from confluent_kafka import KafkaException
+
+    print(f"broker: {settings.bootstrap_servers} ({settings.security_protocol})")
+    admin = AdminClient(settings.admin_config())
+    try:
+        metadata = admin.list_topics(timeout=timeout_s)
+    except KafkaException as exc:
+        raise SystemExit(f"sem conexão com o broker: {exc}")
+
+    # o cliente segue os endereços anunciados pelo broker, não o bootstrap
+    for broker in metadata.brokers.values():
+        print(f"anunciado: broker {broker.id} em {broker.host}:{broker.port}")
+    faltando = []
+    for topico in settings.topics:
+        info = metadata.topics.get(topico)
+        if info is None or info.error is not None:
+            faltando.append(topico)
+            print(f"  FALTA  {topico}" + (f" ({info.error})" if info is not None else ""))
+        else:
+            print(f"  ok     {topico} ({len(info.partitions)} partição(ões))")
+    if faltando:
+        raise SystemExit(f"{len(faltando)} tópico(s) do I9 ausente(s) no broker")
 
 
 def send(path: str, topic: str | None, settings: KafkaSettings) -> None:
@@ -73,10 +102,14 @@ def main() -> None:
     p_send.add_argument("--topic", help="tópico de destino (padrão: campo `schema` de cada mensagem)")
     p_tail = sub.add_parser("tail", help="imprime as mensagens de um tópico")
     p_tail.add_argument("topic", nargs="?", default="ods.i9.ppe_compliance")
+    p_check = sub.add_parser("check", help="testa a conexão e confere os tópicos do I9")
+    p_check.add_argument("--timeout", type=float, default=10.0, help="segundos (padrão: 10)")
     args = parser.parse_args()
 
     settings = KafkaSettings.from_env()
-    if args.command == "send":
+    if args.command == "check":
+        check(settings, args.timeout)
+    elif args.command == "send":
         send(args.path, args.topic, settings)
     else:
         tail(args.topic, settings)
