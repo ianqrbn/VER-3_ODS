@@ -214,8 +214,38 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(dlq[0]["value"], b"{nao e json")
         self.assertEqual(dlq[0]["headers"]["source_offset"], b"1")
         self.assertIn("error", dlq[0]["headers"])
-        self.assertEqual(consumer.commits, [1, 2])
+        # um commit por lote e partição: o offset 2 confirma também o 1
+        self.assertEqual(consumer.commits, [2])
         self.assertEqual(len(outputs(producer)), 1)
+
+    def test_lote_confirma_uma_vez_depois_de_entregar_tudo(self):
+        service, producer, consumer, _ = build_service([i1_message(o, sequence=o) for o in (4, 5, 6)])
+        self.assertEqual(service.run(max_frames=3), 3)
+        self.assertEqual(len(outputs(producer)), 3)
+        self.assertEqual(consumer.commits, [6])
+
+    def test_lote_respeita_o_tamanho_maximo(self):
+        service, _, consumer, _ = build_service([i1_message(o, sequence=o) for o in range(1, 6)])
+        service.max_batch = 2
+        self.assertEqual(service.run(max_frames=5), 5)
+        self.assertEqual(consumer.commits, [2, 4, 5])
+
+    def test_falha_de_entrega_nao_confirma_nada_do_lote(self):
+        invalida = FakeMessage("{nao e json", topic="ods.i1.detections", offset=1)
+        producer = FakeProducer(fail_with=FakeError("broker indisponível"))
+        service, _, consumer, _ = build_service([invalida, i1_message(2)], producer=producer)
+        with self.assertRaises(DeliveryError):
+            service.run(max_frames=1)
+        # nem a mensagem inválida: a cópia no DLQ também não foi confirmada
+        self.assertEqual(consumer.commits, [])
+
+    def test_lote_so_com_mensagens_invalidas_e_confirmado(self):
+        invalidas = [FakeMessage("{x", topic="ods.i1.detections", offset=o) for o in (1, 2)]
+        service, producer, consumer, _ = build_service(invalidas + [i1_message(3)])
+        service.max_batch = 1
+        self.assertEqual(service.run(max_frames=1), 1)
+        self.assertEqual(len(outputs(producer, "ods.i9.dlq")), 2)
+        self.assertEqual(consumer.commits, [3])
 
     def test_sem_dlq_a_mensagem_invalida_e_so_registrada(self):
         invalida = FakeMessage(dict(EXAMPLE_I1, schema="outro"), offset=1)

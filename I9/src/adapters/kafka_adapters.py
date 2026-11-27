@@ -66,6 +66,7 @@ class KafkaSettings:
     poll_timeout_s: float = 1.0
     delivery_timeout_s: float = 10.0
     calibration_warmup_s: float = 3.0
+    max_batch: int = 500
     security_protocol: str = "PLAINTEXT"
     sasl_mechanism: str = ""
     sasl_username: str = ""
@@ -93,6 +94,7 @@ class KafkaSettings:
             calibration_warmup_s=float(
                 _env(env, "I9_CALIBRATION_WARMUP_S", str(default.calibration_warmup_s))
             ),
+            max_batch=int(_env(env, "I9_MAX_BATCH", str(default.max_batch))),
             security_protocol=_env(env, "KAFKA_SECURITY_PROTOCOL", default.security_protocol),
             sasl_mechanism=_env(env, "KAFKA_SASL_MECHANISM", ""),
             sasl_username=_env(env, "KAFKA_SASL_USERNAME", ""),
@@ -248,11 +250,12 @@ class DeadLetterPublisher:
 
 
 class KafkaIngestionAdapter:
-    """Porta de ingestão: consome `ods.i1.detections` com commit manual.
+    """Porta de ingestão: consome `ods.i1.detections` com commit manual, em lotes.
 
-    `get_next_event` devolve o próximo quadro válido ou None quando não chegou
-    nada dentro do `poll_timeout_s`. Depois de publicar a saída, quem orquestra
-    chama `commit()` para confirmar o offset do quadro.
+    `poll_batch` devolve, em ordem, as mensagens já disponíveis com o quadro
+    lido (ou None, se a mensagem foi rejeitada). Quem orquestra processa cada
+    quadro, chama `ack(message)` e, depois que a saída foi entregue, `commit()`
+    confirma de uma vez o último offset reconhecido de cada partição.
     """
 
     def __init__(
@@ -266,36 +269,62 @@ class KafkaIngestionAdapter:
         self.topic = topic
         self.poll_timeout_s = poll_timeout_s
         self._dead_letters = dead_letters
-        self._pending = None
+        self._pending: Dict[Tuple[str, int], Any] = {}
         self.rejected: List[Tuple[Any, str]] = []
         self._consumer.subscribe([topic])
 
+    def poll_batch(self, max_frames: int) -> List[Tuple[Any, Optional[DetectionFrame]]]:
+        """Espera até `poll_timeout_s` pela primeira mensagem e pega as que já chegaram.
+
+        Para ao juntar `max_frames` quadros válidos ou quando não há mais nada
+        disponível. Mensagens inválidas vêm com quadro None (já foram ao DLQ).
+        """
+        lote: List[Tuple[Any, Optional[DetectionFrame]]] = []
+        quadros = 0
+        timeout = self.poll_timeout_s
+        while quadros < max_frames:
+            message = self._consumer.poll(timeout)
+            if message is None:
+                break
+            # depois da primeira, só o que já está no buffer do cliente
+            timeout = 0.0
+            error = message.error()
+            if error is not None:
+                if _is_fatal(error):
+                    raise RuntimeError(f"erro fatal do consumidor Kafka: {error}")
+                logger.warning("erro do consumidor em %s: %s", self.topic, error)
+                continue
+            try:
+                frame = DetectionFrame.from_event(decode_message(message.value()))
+            except (ValueError, UnicodeDecodeError) as exc:
+                self._reject(message, str(exc))
+                lote.append((message, None))
+                continue
+            lote.append((message, frame))
+            quadros += 1
+        return lote
+
     def get_next_event(self) -> Optional[DetectionFrame]:
-        message = self._consumer.poll(self.poll_timeout_s)
-        if message is None:
-            return None
-        error = message.error()
-        if error is not None:
-            if _is_fatal(error):
-                raise RuntimeError(f"erro fatal do consumidor Kafka: {error}")
-            logger.warning("erro do consumidor em %s: %s", self.topic, error)
-            return None
+        """Porta de ingestão quadro a quadro (o serviço Kafka usa `poll_batch`)."""
+        for message, frame in self.poll_batch(1):
+            self.ack(message)
+            if frame is not None:
+                return frame
+        return None
 
-        try:
-            frame = DetectionFrame.from_event(decode_message(message.value()))
-        except (ValueError, UnicodeDecodeError) as exc:
-            self._reject(message, str(exc))
-            return None
+    def ack(self, message) -> None:
+        """Marca a mensagem como tratada; o offset só vai ao broker em `commit()`."""
+        self._pending[(message.topic(), message.partition())] = message
 
-        self._pending = message
-        return frame
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._pending)
 
     def commit(self) -> None:
-        """Confirma o offset do último quadro devolvido (após a saída ser entregue)."""
-        if self._pending is None:
-            return
-        self._consumer.commit(message=self._pending, asynchronous=False)
-        self._pending = None
+        """Confirma o último offset reconhecido de cada partição (após a saída ser entregue)."""
+        for message in self._pending.values():
+            self._consumer.commit(message=message, asynchronous=False)
+        self._pending = {}
 
     def close(self) -> None:
         self._consumer.close()
@@ -306,10 +335,10 @@ class KafkaIngestionAdapter:
             message.topic(), message.partition(), message.offset(), reason,
         )
         self.rejected.append((message.value(), reason))
+        # o offset é confirmado junto com o lote, depois do flush que entrega
+        # também a cópia no DLQ
         if self._dead_letters is not None:
             self._dead_letters.send(message, reason)
-        # mensagem inválida não volta a ser processada
-        self._consumer.commit(message=message, asynchronous=False)
 
 
 class KafkaCalibrationAdapter:
@@ -404,18 +433,24 @@ class KafkaArtifactAdapter:
 class KafkaI9Service:
     """Laço contínuo do I9 sobre o barramento.
 
-    Para cada quadro: atualiza calibrações, processa, espera a confirmação da
-    publicação e só então confirma o offset do I1. Uma falha de entrega
-    interrompe o serviço sem confirmar o offset, para o quadro ser reprocessado.
+    Em lotes: atualiza calibrações, lê os quadros já disponíveis (até
+    `max_batch`), processa cada um, espera a confirmação de todas as
+    publicações com um único flush e só então confirma os offsets do I1. Uma
+    falha de entrega interrompe o serviço sem confirmar o lote, para os
+    quadros serem reprocessados. Confirmar por lote, e não por quadro, evita
+    duas idas ao broker a cada quadro, o que limitava a vazão a poucos quadros
+    por segundo num broker remoto.
     """
 
     def __init__(self, pipeline, ingestion: KafkaIngestionAdapter, calibration: KafkaCalibrationAdapter,
-                 publisher: KafkaPublisherAdapter, artifacts: Optional[KafkaArtifactAdapter] = None):
+                 publisher: KafkaPublisherAdapter, artifacts: Optional[KafkaArtifactAdapter] = None,
+                 max_batch: int = 500):
         self.pipeline = pipeline
         self.ingestion = ingestion
         self.calibration = calibration
         self.publisher = publisher
         self.artifacts = artifacts
+        self.max_batch = max_batch
         self.processed = 0
         self._running = False
 
@@ -434,13 +469,20 @@ class KafkaI9Service:
                 self.calibration.drain()
                 if self.artifacts is not None:
                     self._apply_catalog(self.artifacts.drain())
-                frame = self.ingestion.get_next_event()
-                if frame is None:
-                    continue
-                self.pipeline.process(frame)
-                self.publisher.flush()
-                self.ingestion.commit()
-                self.processed += 1
+                limite = self.max_batch
+                if max_frames is not None:
+                    limite = min(limite, max_frames - self.processed)
+                for message, frame in self.ingestion.poll_batch(limite):
+                    # parada no meio do lote: o que não foi processado não é confirmado
+                    if not self._running:
+                        break
+                    if frame is not None:
+                        self.pipeline.process(frame)
+                        self.processed += 1
+                    self.ingestion.ack(message)
+                if self.ingestion.has_pending:
+                    self.publisher.flush()
+                    self.ingestion.commit()
         finally:
             self.close()
         return self.processed
@@ -504,7 +546,7 @@ def build_kafka_service(build_pipeline: Callable[..., Any], settings: Optional[K
     publisher = KafkaPublisherAdapter(producer, settings.compliance_topic, settings.delivery_timeout_s)
 
     pipeline = build_pipeline(ingestion=ingestion, calibration=calibration, output=publisher)
-    return KafkaI9Service(pipeline, ingestion, calibration, publisher, artifacts)
+    return KafkaI9Service(pipeline, ingestion, calibration, publisher, artifacts, settings.max_batch)
 
 
 def install_signal_handlers(service: KafkaI9Service) -> None:
